@@ -1,0 +1,23 @@
+{
+  "name": "losing-moneyz",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "lint": "pnpm -r run lint",
+    "test": "pnpm -r run test",
+    "test:integration": "pnpm -r run test:integration",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "backtest:validate": "pnpm -r run backtest:validate",
+    "status": "pnpm --filter functions run status",
+    "experiment:stop": "pnpm --filter functions run experiment:stop",
+    "wallet:sync": "pnpm --filter functions run wallet:sync"
+  },
+  "packageManager": "pnpm@10.18.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "protobufjs", "@firebase/util"]
+  }
+}

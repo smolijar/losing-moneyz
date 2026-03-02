@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Single-user app: deny all client access.
+    // All reads/writes happen through Firebase Admin SDK (Cloud Functions).
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
