@@ -1,4 +1,4 @@
-import type { Experiment, ExperimentSnapshot } from "../config";
+import type { Experiment, ExperimentSnapshot, AutopilotConfig } from "../config";
 import { COINMATE_FEES } from "../config";
 import { CoinmateApiError, type ExchangeClient } from "../coinmate";
 import {
@@ -13,6 +13,7 @@ import {
 } from "../grid";
 import type { Repository } from "../storage";
 import type { WalletManager } from "../storage";
+import { Autopilot, type AutopilotResult } from "../autopilot";
 import {
   runAllSafeguards,
   type SafeguardConfig,
@@ -35,6 +36,7 @@ export interface GridTickResult {
   timestamp: Date;
   experimentResults: TickResult[];
   totalDurationMs: number;
+  autopilotResult?: AutopilotResult;
 }
 
 /** Logger interface — thin abstraction for structured logging */
@@ -116,12 +118,15 @@ export interface OrchestratorOptions {
   safeguardConfig?: SafeguardConfig;
   alertSink?: AlertSink;
   walletManager?: WalletManager;
+  /** Autopilot config. Pass `false` to disable autopilot entirely. */
+  autopilotConfig?: Partial<AutopilotConfig> | false;
 }
 
 export class GridTickOrchestrator {
   private readonly alertSink: AlertSink;
   private readonly safeguardConfig: SafeguardConfig;
   private readonly walletManager: WalletManager | undefined;
+  private readonly autopilot: Autopilot | undefined;
 
   constructor(
     private readonly client: ExchangeClient,
@@ -132,6 +137,17 @@ export class GridTickOrchestrator {
     this.safeguardConfig = options?.safeguardConfig ?? DEFAULT_SAFEGUARD_CONFIG;
     this.alertSink = options?.alertSink ?? nullAlertSink;
     this.walletManager = options?.walletManager;
+
+    // Initialize autopilot if wallet manager is available and not explicitly disabled
+    if (this.walletManager && options?.autopilotConfig !== false) {
+      this.autopilot = new Autopilot(
+        client,
+        repo,
+        this.walletManager,
+        logger,
+        options?.autopilotConfig || undefined,
+      );
+    }
   }
 
   /**
@@ -147,6 +163,7 @@ export class GridTickOrchestrator {
     this.logger.info(`Found ${experiments.length} active experiments`);
 
     const results: TickResult[] = [];
+    let autopilotResult: AutopilotResult | undefined;
 
     for (const experiment of experiments) {
       const result = await this.processExperiment(experiment, timestamp);
@@ -160,13 +177,29 @@ export class GridTickOrchestrator {
       results.push(result);
     }
 
+    // Autopilot: when no active experiments, try to self-regulate
+    if (experiments.length === 0 && this.autopilot) {
+      try {
+        autopilotResult = await this.autopilot.engage();
+        this.logger.info("Autopilot result", {
+          action: autopilotResult.action,
+          reason: autopilotResult.reason,
+          experimentId: autopilotResult.experimentId,
+        });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        this.logger.error("Autopilot failed", { error: errMsg });
+        // Non-fatal: autopilot failure should not crash the tick
+      }
+    }
+
     const totalDurationMs = Date.now() - startTime;
     this.logger.info("Grid tick completed", {
       durationMs: totalDurationMs,
       experiments: results.length,
     });
 
-    return { timestamp, experimentResults: results, totalDurationMs };
+    return { timestamp, experimentResults: results, totalDurationMs, autopilotResult };
   }
 
   /**

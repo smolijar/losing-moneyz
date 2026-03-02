@@ -20,3 +20,6 @@ export {
   type SafeguardConfig,
   DEFAULT_SAFEGUARD_CONFIG,
 } from "./safeguards";
+
+// Re-export autopilot for convenience
+export { Autopilot, type AutopilotResult } from "../autopilot";

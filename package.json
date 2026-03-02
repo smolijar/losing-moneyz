@@ -10,6 +10,7 @@
     "typecheck": "pnpm -r run typecheck",
     "backtest:validate": "pnpm -r run backtest:validate",
     "status": "pnpm --filter functions run status",
+    "experiment:create": "pnpm --filter functions run experiment:create --",
     "experiment:stop": "pnpm --filter functions run experiment:stop",
     "wallet:sync": "pnpm --filter functions run wallet:sync"
   },

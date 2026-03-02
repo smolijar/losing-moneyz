@@ -1,4 +1,5 @@
 import type {
+  AutopilotState,
   Experiment,
   ExperimentSnapshot,
   ExperimentStatus,
@@ -22,6 +23,7 @@ export class InMemoryRepository implements Repository {
     availableQuote: 0,
     availableBase: 0,
   };
+  private autopilotState: AutopilotState | undefined;
   private idCounter = 0;
 
   private nextId(): string {
@@ -191,6 +193,26 @@ export class InMemoryRepository implements Repository {
     return fn(this);
   }
 
+  // ─── Autopilot ────────────────────────────────────────────────────────
+
+  async getAutopilotState(): Promise<AutopilotState | undefined> {
+    return this.autopilotState ? { ...this.autopilotState } : undefined;
+  }
+
+  async updateAutopilotState(state: Partial<AutopilotState>): Promise<void> {
+    if (!this.autopilotState) {
+      this.autopilotState = {
+        lastActionAt: new Date(),
+        lastConfig: null,
+        lastReason: "",
+        enabled: true,
+        ...state,
+      };
+    } else {
+      Object.assign(this.autopilotState, state);
+    }
+  }
+
   // ─── Test helpers ─────────────────────────────────────────────────────
 
   /** Set initial wallet state for testing */
@@ -209,6 +231,7 @@ export class InMemoryRepository implements Repository {
       availableQuote: 0,
       availableBase: 0,
     };
+    this.autopilotState = undefined;
     this.idCounter = 0;
   }
 }

@@ -1,0 +1,240 @@
+import {
+  type AutopilotConfig,
+  type AutopilotState,
+  AUTOPILOT_DEFAULTS,
+} from "../config";
+import type { ExchangeClient } from "../coinmate";
+import type { Repository } from "../storage";
+import { WalletManager } from "../storage";
+import { validateWithBacktest, type PriceTick } from "../backtest";
+import { suggestParams } from "./param-suggester";
+import type { Logger } from "../tick";
+
+/** Result of an autopilot engagement attempt */
+export interface AutopilotResult {
+  action: "created" | "skipped";
+  reason: string;
+  experimentId?: string;
+  config?: {
+    lowerPrice: number;
+    upperPrice: number;
+    levels: number;
+    budgetQuote: number;
+    pair: string;
+  };
+}
+
+/**
+ * Autopilot — self-regulating grid experiment manager.
+ *
+ * When there are no active experiments, the autopilot:
+ * 1. Checks cooldown to prevent churn
+ * 2. Cleans up paused experiments (stop + release wallet)
+ * 3. Pulls available wallet capital
+ * 4. Fetches recent price data from the exchange
+ * 5. Computes volatility-based grid parameters
+ * 6. Validates via backtest
+ * 7. Creates a new experiment if everything checks out
+ */
+export class Autopilot {
+  private readonly config: AutopilotConfig;
+
+  constructor(
+    private readonly client: ExchangeClient,
+    private readonly repo: Repository,
+    private readonly walletManager: WalletManager,
+    private readonly logger: Logger,
+    config?: Partial<AutopilotConfig>,
+  ) {
+    this.config = { ...AUTOPILOT_DEFAULTS, ...config };
+  }
+
+  /**
+   * Attempt to create a new self-regulated experiment.
+   * Called by the orchestrator when there are 0 active experiments.
+   */
+  async engage(): Promise<AutopilotResult> {
+    // 0. Check kill switch
+    const autopilotState = await this.repo.getAutopilotState();
+    if (autopilotState && !autopilotState.enabled) {
+      this.logger.info("Autopilot disabled via kill switch");
+      return { action: "skipped", reason: "disabled" };
+    }
+
+    // 1. Check cooldown
+    if (autopilotState?.lastActionAt) {
+      const elapsed = Date.now() - autopilotState.lastActionAt.getTime();
+      const cooldownMs = this.config.cooldownMinutes * 60 * 1000;
+      if (elapsed < cooldownMs) {
+        const remainingMin = ((cooldownMs - elapsed) / 60000).toFixed(1);
+        this.logger.info(`Autopilot cooldown: ${remainingMin} min remaining`);
+        return { action: "skipped", reason: `cooldown (${remainingMin} min remaining)` };
+      }
+    }
+
+    // 2. Check that no stopped experiments are still being cleaned up
+    const stopped = await this.repo.getExperimentsByStatus("stopped");
+    if (stopped.length > 0) {
+      this.logger.info("Autopilot waiting: stopped experiments still being cleaned up", {
+        count: stopped.length,
+      });
+      return { action: "skipped", reason: "stopped experiments pending cleanup" };
+    }
+
+    // 3. Clean up paused experiments (release wallet)
+    const paused = await this.repo.getExperimentsByStatus("paused");
+    for (const exp of paused) {
+      if (exp.allocatedQuote > 0 || exp.allocatedBase > 0) {
+        this.logger.info("Autopilot releasing wallet for paused experiment", {
+          experimentId: exp.id,
+        });
+        await this.walletManager.releaseForExperiment(exp.id);
+      }
+    }
+
+    // 4. Pull wallet capital
+    const wallet = await this.walletManager.getState();
+    if (wallet.availableQuote < this.config.minBudgetQuote) {
+      const reason = `Insufficient capital: ${wallet.availableQuote.toFixed(2)} < ${this.config.minBudgetQuote}`;
+      this.logger.info(`Autopilot skipped: ${reason}`);
+      await this.saveState(null, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    // 5. Fetch recent price data
+    let ticks: PriceTick[];
+    try {
+      const txResponse = await this.client.getTransactions(
+        this.config.pair,
+        this.config.minHistoryMinutes,
+      );
+      if (txResponse.error) {
+        const reason = `Exchange error: ${txResponse.errorMessage}`;
+        this.logger.warn(`Autopilot skipped: ${reason}`);
+        await this.saveState(null, `skipped:${reason}`);
+        return { action: "skipped", reason };
+      }
+      ticks = txResponse.data.map((t) => ({
+        timestamp: t.timestamp,
+        price: t.price,
+        amount: t.amount,
+        side: t.tradeType === "BUY" ? ("buy" as const) : ("sell" as const),
+      }));
+    } catch (err) {
+      const reason = `Failed to fetch transactions: ${err instanceof Error ? err.message : String(err)}`;
+      this.logger.warn(`Autopilot skipped: ${reason}`);
+      await this.saveState(null, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    if (ticks.length < 100) {
+      const reason = `Insufficient price data: ${ticks.length} ticks (need >= 100)`;
+      this.logger.info(`Autopilot skipped: ${reason}`);
+      await this.saveState(null, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    // Sort ticks by timestamp ascending
+    ticks.sort((a, b) => a.timestamp - b.timestamp);
+
+    // 6. Suggest parameters
+    const suggestion = suggestParams(ticks, wallet.availableQuote, this.config);
+    if (!suggestion) {
+      const reason = "Parameter suggestion failed (could not find valid config)";
+      this.logger.warn(`Autopilot skipped: ${reason}`);
+      await this.saveState(null, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    this.logger.info("Autopilot suggested config", {
+      config: suggestion.config,
+      metrics: suggestion.metrics,
+    });
+
+    // 7. Validate via backtest
+    const validation = validateWithBacktest(suggestion.config, ticks, {
+      minReturnPercent: this.config.backtestMinReturnPercent,
+      maxDrawdownPercent: this.config.backtestMaxDrawdownPercent,
+    });
+
+    if (!validation.approved) {
+      const reason = `Backtest rejected: ${validation.reasons.join("; ")}`;
+      this.logger.warn(`Autopilot skipped: ${reason}`);
+      await this.saveState(suggestion.config, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    this.logger.info("Autopilot backtest passed", {
+      returnPercent: validation.report.totalReturnPercent.toFixed(2),
+      maxDrawdown: validation.report.maxDrawdownPercent.toFixed(2),
+      completedCycles: validation.report.completedCycles,
+    });
+
+    // 8. Create experiment
+    const experimentId = await this.repo.createExperiment({
+      status: "active",
+      gridConfig: suggestion.config,
+      allocatedQuote: suggestion.config.budgetQuote,
+      allocatedBase: 0,
+      consecutiveFailures: 0,
+    });
+
+    // 9. Allocate wallet
+    const allocation = await this.walletManager.allocateForExperiment(
+      experimentId,
+      suggestion.config,
+    );
+
+    if (!allocation.success) {
+      // Rollback: set experiment to stopped
+      this.logger.error("Autopilot wallet allocation failed, rolling back", {
+        experimentId,
+        reason: allocation.reason,
+      });
+      await this.repo.updateExperimentStatus(experimentId, "stopped");
+      const reason = `Wallet allocation failed: ${allocation.reason}`;
+      await this.saveState(suggestion.config, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    await this.saveState(suggestion.config, "created");
+
+    this.logger.info("Autopilot created experiment", {
+      experimentId,
+      pair: suggestion.config.pair,
+      lowerPrice: suggestion.config.lowerPrice,
+      upperPrice: suggestion.config.upperPrice,
+      levels: suggestion.config.levels,
+      budgetQuote: suggestion.config.budgetQuote,
+      dailyVolatility: (suggestion.metrics.dailyVolatility * 100).toFixed(2) + "%",
+    });
+
+    return {
+      action: "created",
+      reason: "Experiment created successfully",
+      experimentId,
+      config: suggestion.config,
+    };
+  }
+
+  private async saveState(
+    config: AutopilotResult["config"] | null,
+    reason: string,
+  ): Promise<void> {
+    try {
+      const state: Partial<AutopilotState> = {
+        lastActionAt: new Date(),
+        lastReason: reason,
+      };
+      if (config !== undefined) {
+        state.lastConfig = config as AutopilotState["lastConfig"];
+      }
+      await this.repo.updateAutopilotState(state);
+    } catch (err) {
+      // Non-fatal: don't fail the whole operation if state save fails
+      this.logger.warn("Failed to save autopilot state", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}

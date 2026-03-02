@@ -1,0 +1,227 @@
+import {
+  type GridConfig,
+  type AutopilotConfig,
+  COINMATE_FEES,
+  AUTOPILOT_DEFAULTS,
+  getPairLimits,
+} from "../config";
+import {
+  validateGridConfig,
+  getGridSpacingPercent,
+  getBudgetPerLevel,
+} from "../grid";
+import type { PriceTick } from "../backtest";
+
+/** Result of parameter suggestion */
+export interface SuggestResult {
+  config: GridConfig;
+  /** Metrics used to derive the suggestion */
+  metrics: {
+    currentPrice: number;
+    dailyVolatility: number;
+    halfRange: number;
+    desiredSpacingPercent: number;
+    adjustments: string[];
+  };
+}
+
+/**
+ * Resample raw trade ticks into fixed-interval OHLC candles.
+ *
+ * @param ticks  Raw trades sorted by timestamp ascending
+ * @param intervalMs  Candle interval in milliseconds (default 5 min)
+ * @returns Array of candle close prices with timestamps
+ */
+export function resampleToCandles(
+  ticks: PriceTick[],
+  intervalMs: number = 5 * 60 * 1000,
+): Array<{ timestamp: number; close: number }> {
+  if (ticks.length === 0) return [];
+
+  const candles: Array<{ timestamp: number; close: number }> = [];
+  let bucketStart = ticks[0].timestamp;
+  let lastPrice = ticks[0].price;
+
+  for (const tick of ticks) {
+    while (tick.timestamp >= bucketStart + intervalMs) {
+      // Close previous candle
+      candles.push({ timestamp: bucketStart, close: lastPrice });
+      bucketStart += intervalMs;
+    }
+    lastPrice = tick.price;
+  }
+  // Close final candle
+  candles.push({ timestamp: bucketStart, close: lastPrice });
+
+  return candles;
+}
+
+/**
+ * Compute daily volatility (standard deviation of log-returns, annualized to 1 day).
+ *
+ * @param candles  Array of candle close prices (assumed equally spaced)
+ * @param intervalMs  Interval between candles in ms
+ * @returns Daily volatility as a decimal (e.g. 0.03 = 3%)
+ */
+export function computeDailyVolatility(
+  candles: Array<{ close: number }>,
+  intervalMs: number = 5 * 60 * 1000,
+): number {
+  if (candles.length < 2) return 0;
+
+  // Compute log-returns
+  const logReturns: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    if (candles[i - 1].close > 0 && candles[i].close > 0) {
+      logReturns.push(Math.log(candles[i].close / candles[i - 1].close));
+    }
+  }
+
+  if (logReturns.length < 2) return 0;
+
+  // Standard deviation of log-returns
+  const mean = logReturns.reduce((s, r) => s + r, 0) / logReturns.length;
+  const variance = logReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (logReturns.length - 1);
+  const stdDev = Math.sqrt(variance);
+
+  // Scale to daily: periods per day = 24 * 60 * 60 * 1000 / intervalMs
+  const periodsPerDay = (24 * 60 * 60 * 1000) / intervalMs;
+  const dailyVol = stdDev * Math.sqrt(periodsPerDay);
+
+  return dailyVol;
+}
+
+/**
+ * Suggest grid parameters based on recent price volatility and available capital.
+ *
+ * Algorithm:
+ * 1. Resample ticks to 5-min candles
+ * 2. Compute daily volatility (σ_daily) from log-returns
+ * 3. Set range: currentPrice ± σ_daily * rangeMultiplier * currentPrice
+ * 4. Set spacing: max(minProfitable, σ_daily * spacingMultiplier * 100)%
+ * 5. Derive levels from range and spacing
+ * 6. Clamp levels to [3, 50], budget = available capital
+ * 7. Validate and adjust until config passes validateGridConfig()
+ */
+export function suggestParams(
+  ticks: PriceTick[],
+  availableQuote: number,
+  autopilotConfig: AutopilotConfig = AUTOPILOT_DEFAULTS,
+): SuggestResult | null {
+  if (ticks.length < 10) return null;
+
+  const adjustments: string[] = [];
+  const currentPrice = ticks[ticks.length - 1].price;
+
+  if (currentPrice <= 0) return null;
+
+  // Step 1: Resample to 5-min candles
+  const candleIntervalMs = 5 * 60 * 1000;
+  const candles = resampleToCandles(ticks, candleIntervalMs);
+
+  if (candles.length < 2) return null;
+
+  // Step 2: Compute daily volatility
+  let dailyVol = computeDailyVolatility(candles, candleIntervalMs);
+
+  // Floor volatility: if market is extremely flat, use a minimum
+  const feeRate = COINMATE_FEES.maker;
+  const minSpacingPercent = feeRate * 2 * 100 * COINMATE_FEES.minSpacingMultiplier; // 2.4%
+  const minVolFloor = (minSpacingPercent / 100) * 2; // Enough for at least a few levels
+  if (dailyVol < minVolFloor) {
+    dailyVol = minVolFloor;
+    adjustments.push(`Volatility floored to ${(minVolFloor * 100).toFixed(2)}%`);
+  }
+
+  // Step 3: Derive grid range
+  const halfRange = currentPrice * dailyVol * autopilotConfig.rangeMultiplier;
+  let lowerPrice = Math.max(1, Math.round((currentPrice - halfRange) * 100) / 100);
+  let upperPrice = Math.round((currentPrice + halfRange) * 100) / 100;
+
+  // Ensure upper > lower
+  if (upperPrice <= lowerPrice) {
+    upperPrice = lowerPrice + currentPrice * 0.05;
+    adjustments.push("Range widened: upper was <= lower");
+  }
+
+  // Step 4: Derive spacing and levels
+  let desiredSpacingPercent = Math.max(
+    minSpacingPercent,
+    dailyVol * autopilotConfig.spacingMultiplier * 100,
+  );
+  const spacingAbs = (desiredSpacingPercent / 100) * currentPrice;
+  let levels = Math.floor((upperPrice - lowerPrice) / spacingAbs) + 1;
+
+  // Step 5: Clamp levels
+  if (levels < 3) {
+    levels = 3;
+    adjustments.push("Levels clamped to minimum 3");
+  }
+  if (levels > 50) {
+    levels = 50;
+    // Recalculate range to fit 50 levels at current spacing
+    const maxRange = spacingAbs * 49;
+    lowerPrice = Math.max(1, Math.round((currentPrice - maxRange / 2) * 100) / 100);
+    upperPrice = Math.round((currentPrice + maxRange / 2) * 100) / 100;
+    adjustments.push("Levels clamped to 50, range adjusted");
+  }
+
+  // Step 6: Build config
+  let config: GridConfig = {
+    pair: autopilotConfig.pair,
+    lowerPrice,
+    upperPrice,
+    levels,
+    budgetQuote: availableQuote,
+  };
+
+  // Step 7: Iterative validation — widen spacing / reduce levels until valid
+  const maxAttempts = 10;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const validation = validateGridConfig(config, currentPrice);
+    if (validation.valid) break;
+
+    // Try to fix common errors
+    const errors = validation.errors.join("; ");
+    if (errors.includes("spacing") && config.levels > 3) {
+      // Spacing too tight — reduce levels
+      config = { ...config, levels: config.levels - 1 };
+      adjustments.push(`Reduced levels to ${config.levels} (spacing too tight)`);
+    } else if (errors.includes("Budget per level") || errors.includes("order size")) {
+      // Budget too low per level — reduce levels
+      if (config.levels > 3) {
+        config = { ...config, levels: config.levels - 1 };
+        adjustments.push(`Reduced levels to ${config.levels} (budget per level too low)`);
+      } else {
+        // Can't reduce further — config is not viable
+        return null;
+      }
+    } else {
+      // Unknown error — bail
+      return null;
+    }
+  }
+
+  // Final validation
+  const finalValidation = validateGridConfig(config, currentPrice);
+  if (!finalValidation.valid) return null;
+
+  // Verify budget per level meets pair minimum
+  const limits = getPairLimits(config.pair);
+  const budgetPerLevel = getBudgetPerLevel(config);
+  const minAmount = budgetPerLevel / config.upperPrice;
+  if (minAmount < limits.minOrderSize) return null;
+
+  desiredSpacingPercent = getGridSpacingPercent(config);
+
+  return {
+    config,
+    metrics: {
+      currentPrice,
+      dailyVolatility: dailyVol,
+      halfRange,
+      desiredSpacingPercent,
+      adjustments,
+    },
+  };
+}

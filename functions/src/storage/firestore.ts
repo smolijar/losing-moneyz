@@ -9,8 +9,10 @@ import {
   ExperimentSnapshotDocSchema,
   OrderRecordDocSchema,
   WalletStateDocSchema,
+  AutopilotStateDocSchema,
 } from "../config";
 import type {
+  AutopilotState,
   Experiment,
   ExperimentSnapshot,
   ExperimentStatus,
@@ -21,6 +23,7 @@ import type {
 import type { Repository } from "./repository";
 
 const WALLET_DOC_PATH = "globalState/wallets";
+const AUTOPILOT_DOC_PATH = "globalState/autopilot";
 
 /**
  * Firestore-backed implementation of the Repository interface.
@@ -285,6 +288,18 @@ export class FirestoreRepository implements Repository {
     return fn(this);
   }
 
+  // ─── Autopilot ────────────────────────────────────────────────────────
+
+  async getAutopilotState(): Promise<AutopilotState | undefined> {
+    const doc = await this.autopilotDoc().get();
+    if (!doc.exists) return undefined;
+    return AutopilotStateDocSchema.parse(doc.data());
+  }
+
+  async updateAutopilotState(state: Partial<AutopilotState>): Promise<void> {
+    await this.autopilotDoc().set(state, { merge: true });
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────
 
   private experimentsCol(): CollectionReference {
@@ -301,6 +316,10 @@ export class FirestoreRepository implements Repository {
 
   private walletDoc(): DocumentReference {
     return this.db.doc(WALLET_DOC_PATH);
+  }
+
+  private autopilotDoc(): DocumentReference {
+    return this.db.doc(AUTOPILOT_DOC_PATH);
   }
 
   private toExperiment(id: string, data: Record<string, unknown>): Experiment {

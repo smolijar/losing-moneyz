@@ -1,4 +1,5 @@
 import type {
+  AutopilotState,
   Experiment,
   ExperimentSnapshot,
   ExperimentStatus,
@@ -105,4 +106,12 @@ export interface Repository {
    * simply execute the callback directly.
    */
   runTransaction<T>(fn: (repo: Repository) => Promise<T>): Promise<T>;
+
+  // ─── Autopilot State ─────────────────────────────────────────────────
+
+  /** Get the current autopilot state. Returns undefined if never set. */
+  getAutopilotState(): Promise<AutopilotState | undefined>;
+
+  /** Update (or create) the autopilot state. */
+  updateAutopilotState(state: Partial<AutopilotState>): Promise<void>;
 }

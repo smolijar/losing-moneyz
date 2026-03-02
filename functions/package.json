@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "backtest:validate": "tsx scripts/validate-backtest.ts",
     "status": "tsx scripts/status.ts",
+    "experiment:create": "tsx scripts/experiment-create.ts",
     "experiment:stop": "tsx scripts/experiment-stop.ts",
     "wallet:sync": "tsx scripts/wallet-sync.ts"
   },

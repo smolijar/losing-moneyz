@@ -221,3 +221,57 @@ export const COINMATE_RATE_LIMIT = {
   /** Target to stay safely under limit */
   targetRequestsPerMinute: 60,
 } as const;
+
+// ─── Autopilot ────────────────────────────────────────────────────────────────
+
+/** Configuration for the self-regulating autopilot */
+export interface AutopilotConfig {
+  /** Trading pair to trade */
+  pair: TradingPair;
+  /** Multiplier for volatility-based range (e.g. 2.0 ≈ 95% daily coverage) */
+  rangeMultiplier: number;
+  /** Multiplier for volatility-based grid spacing */
+  spacingMultiplier: number;
+  /** Minimum minutes of price history required before suggesting params */
+  minHistoryMinutes: number;
+  /** Minimum return % the backtest must produce to approve a config */
+  backtestMinReturnPercent: number;
+  /** Maximum drawdown % the backtest is allowed before rejecting */
+  backtestMaxDrawdownPercent: number;
+  /** Minimum minutes between experiment replacements (prevents churn) */
+  cooldownMinutes: number;
+  /** Minimum viable budget in quote currency (below this, skip) */
+  minBudgetQuote: number;
+}
+
+/** Default autopilot configuration */
+export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
+  pair: "BTC_CZK",
+  rangeMultiplier: 2.0,
+  spacingMultiplier: 1.5,
+  minHistoryMinutes: 1440, // 24 hours
+  backtestMinReturnPercent: -5, // permissive — just avoid disasters
+  backtestMaxDrawdownPercent: 15,
+  cooldownMinutes: 10,
+  minBudgetQuote: 500,
+};
+
+/** Autopilot state persisted to Firestore */
+export interface AutopilotState {
+  /** When the autopilot last took action */
+  lastActionAt: Date;
+  /** The grid config that was last created */
+  lastConfig: GridConfig | null;
+  /** Why the last action was taken (or skipped) */
+  lastReason: string;
+  /** Kill switch — set to false to disable autopilot */
+  enabled: boolean;
+}
+
+/** Schema for AutopilotState document data */
+export const AutopilotStateDocSchema = z.object({
+  lastActionAt: FirestoreDate,
+  lastConfig: GridConfig.nullable().default(null),
+  lastReason: z.string(),
+  enabled: z.boolean(),
+});
