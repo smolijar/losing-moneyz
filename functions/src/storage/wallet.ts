@@ -115,6 +115,8 @@ export class WalletManager {
       await this.repo.updateWalletState({
         availableQuote: actualQuote - wallet.totalAllocatedQuote,
         availableBase: actualBase - wallet.totalAllocatedBase,
+        totalAllocatedQuote: wallet.totalAllocatedQuote,
+        totalAllocatedBase: wallet.totalAllocatedBase,
       });
     }
 

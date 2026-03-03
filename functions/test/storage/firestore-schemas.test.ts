@@ -251,7 +251,7 @@ describe("Firestore document schemas", () => {
       }
     });
 
-    it("should reject missing field", () => {
+    it("should reject missing required field", () => {
       const dataWithout = {
         totalAllocatedQuote: validData.totalAllocatedQuote,
         totalAllocatedBase: validData.totalAllocatedBase,
@@ -259,6 +259,21 @@ describe("Firestore document schemas", () => {
       };
       const result = WalletStateDocSchema.safeParse(dataWithout);
       expect(result.success).toBe(false);
+    });
+
+    it("should default totalAllocated fields to 0 when missing", () => {
+      const partialData = {
+        availableQuote: 100_000,
+        availableBase: 0.05,
+      };
+      const result = WalletStateDocSchema.safeParse(partialData);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.totalAllocatedQuote).toBe(0);
+        expect(result.data.totalAllocatedBase).toBe(0);
+        expect(result.data.availableQuote).toBe(100_000);
+        expect(result.data.availableBase).toBe(0.05);
+      }
     });
 
     it("should reject non-numeric field", () => {

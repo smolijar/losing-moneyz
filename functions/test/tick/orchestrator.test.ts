@@ -65,7 +65,13 @@ function createMockClient(
     buyLimit: vi.fn().mockResolvedValue({ error: false, data: 1001 }),
     sellLimit: vi.fn().mockResolvedValue({ error: false, data: 1002 }),
     cancelOrder: vi.fn().mockResolvedValue({ error: false, data: true }),
-    getBalances: vi.fn().mockResolvedValue({ error: false, data: {} }),
+    getBalances: vi.fn().mockResolvedValue({
+      error: false,
+      data: {
+        CZK: { currency: "CZK", balance: 150_000, reserved: 0, available: 150_000 },
+        BTC: { currency: "BTC", balance: 0.05, reserved: 0, available: 0.05 },
+      },
+    }),
     getTransactions: vi.fn().mockResolvedValue({ error: false, data: [] }),
     getOrderHistory: vi.fn().mockResolvedValue({ error: false, data: [] }),
     ...overrides,
@@ -1000,6 +1006,200 @@ describe("GridTickOrchestrator", () => {
       const errAlert = alerts.find((a) => a.type === "unexpected_error");
       expect(errAlert).toBeDefined();
       expect(errAlert!.severity).toBe("critical");
+    });
+  });
+
+  // ─── Wallet sync ───────────────────────────────────────────────────────────
+
+  describe("wallet sync", () => {
+    it("syncs exchange balances into wallet state at the start of each tick", async () => {
+      // Wallet starts empty (no Firestore doc → defaults to zeros)
+      const client = createMockClient({
+        getBalances: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            CZK: { currency: "CZK", balance: 1_000, reserved: 0, available: 1_000 },
+            BTC: { currency: "BTC", balance: 0.01, reserved: 0, available: 0.01 },
+          },
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      await orchestrator.executeTick();
+
+      const walletState = await walletManager.getState();
+      expect(walletState.availableQuote).toBe(1_000);
+      expect(walletState.availableBase).toBe(0.01);
+    });
+
+    it("accounts for allocated funds during sync", async () => {
+      // Some funds already allocated to a running experiment
+      repo.setWallet({
+        totalAllocatedQuote: 5_000,
+        totalAllocatedBase: 0,
+        availableQuote: 0,
+        availableBase: 0,
+      });
+
+      const client = createMockClient({
+        getBalances: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            CZK: { currency: "CZK", balance: 10_000, reserved: 0, available: 10_000 },
+            BTC: { currency: "BTC", balance: 0, reserved: 0, available: 0 },
+          },
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      await orchestrator.executeTick();
+
+      const walletState = await walletManager.getState();
+      // available = actual (10k) - allocated (5k) = 5k
+      expect(walletState.availableQuote).toBe(5_000);
+      expect(walletState.totalAllocatedQuote).toBe(5_000);
+    });
+
+    it("does not call getBalances when walletManager is not provided", async () => {
+      const client = createMockClient();
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger);
+
+      await orchestrator.executeTick();
+
+      expect(client.getBalances).not.toHaveBeenCalled();
+    });
+
+    it("continues tick when getBalances fails", async () => {
+      await seedExperiment(repo);
+      const client = createMockClient({
+        getBalances: vi.fn().mockRejectedValue(new CoinmateApiError("Unauthorized", 401)),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const logger: Logger = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      const orchestrator = new GridTickOrchestrator(client, repo, logger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      const result = await orchestrator.executeTick();
+
+      // Tick still processes experiments despite sync failure
+      expect(result.experimentResults).toHaveLength(1);
+      expect(result.experimentResults[0].status).toBe("ok");
+      // Error was logged
+      expect(logger.error).toHaveBeenCalledWith(
+        "Wallet sync failed",
+        expect.objectContaining({ error: expect.stringContaining("Unauthorized") }),
+      );
+    });
+
+    it("treats missing currencies as zero balance", async () => {
+      // Exchange only returns EUR — no CZK or BTC entries (fresh account scenario)
+      const client = createMockClient({
+        getBalances: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            EUR: { currency: "EUR", balance: 500, reserved: 0, available: 500 },
+          },
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      await orchestrator.executeTick();
+
+      // Wallet should be synced with zeros since neither CZK nor BTC are present
+      const walletState = await walletManager.getState();
+      expect(walletState.availableQuote).toBe(0);
+      expect(walletState.availableBase).toBe(0);
+    });
+
+    it("syncs CZK balance when BTC is missing (production scenario)", async () => {
+      // Production: account has CZK and EUR but has never held BTC
+      const client = createMockClient({
+        getBalances: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            EUR: { currency: "EUR", balance: 100, reserved: 0, available: 100 },
+            CZK: { currency: "CZK", balance: 1_000, reserved: 0, available: 1_000 },
+          },
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      await orchestrator.executeTick();
+
+      const walletState = await walletManager.getState();
+      expect(walletState.availableQuote).toBe(1_000);
+      expect(walletState.availableBase).toBe(0);
+    });
+
+    it("logs warning when discrepancy is detected", async () => {
+      repo.setWallet({
+        totalAllocatedQuote: 5_000,
+        totalAllocatedBase: 0,
+        availableQuote: 1_000,  // internal thinks available = 1k
+        availableBase: 0,
+      });
+
+      const client = createMockClient({
+        getBalances: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            CZK: { currency: "CZK", balance: 10_000, reserved: 0, available: 10_000 },
+            BTC: { currency: "BTC", balance: 0, reserved: 0, available: 0 },
+          },
+        }),
+      });
+
+      const logger: Logger = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, logger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      await orchestrator.executeTick();
+
+      // Internal total was 5k+1k=6k, actual is 10k → discrepancy of 4k
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Wallet discrepancy detected",
+        expect.objectContaining({
+          quoteDiscrepancy: 4_000,
+        }),
+      );
+
+      // Wallet updated to reflect reality
+      const walletState = await walletManager.getState();
+      expect(walletState.availableQuote).toBe(5_000); // 10k actual - 5k allocated
     });
   });
 

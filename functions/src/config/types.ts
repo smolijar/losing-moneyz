@@ -164,8 +164,8 @@ export const ExperimentSnapshotDocSchema = z.object({
 
 /** Schema for WalletState document data */
 export const WalletStateDocSchema = z.object({
-  totalAllocatedQuote: z.number(),
-  totalAllocatedBase: z.number(),
+  totalAllocatedQuote: z.number().default(0),
+  totalAllocatedBase: z.number().default(0),
   availableQuote: z.number(),
   availableBase: z.number(),
 });
@@ -259,19 +259,19 @@ export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
 /** Autopilot state persisted to Firestore */
 export interface AutopilotState {
   /** When the autopilot last took action */
-  lastActionAt: Date;
+  lastActionAt?: Date;
   /** The grid config that was last created */
-  lastConfig: GridConfig | null;
+  lastConfig?: GridConfig | null;
   /** Why the last action was taken (or skipped) */
-  lastReason: string;
+  lastReason?: string;
   /** Kill switch — set to false to disable autopilot */
   enabled: boolean;
 }
 
 /** Schema for AutopilotState document data */
 export const AutopilotStateDocSchema = z.object({
-  lastActionAt: FirestoreDate,
-  lastConfig: GridConfig.nullable().default(null),
-  lastReason: z.string(),
-  enabled: z.boolean(),
+  lastActionAt: FirestoreDate.optional(),
+  lastConfig: GridConfig.nullable().default(null).optional(),
+  lastReason: z.string().optional(),
+  enabled: z.boolean().default(true),
 });

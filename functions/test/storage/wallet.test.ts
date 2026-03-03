@@ -213,6 +213,26 @@ describe("WalletManager", () => {
       expect(result.quoteDiscrepancy).toBeCloseTo(-50_000);
       expect(result.walletState!.availableQuote).toBe(150_000);
     });
+
+    it("syncs correctly from fresh/empty wallet state", async () => {
+      // Default InMemoryRepository wallet has all zeros — simulates a fresh
+      // deployment where the Firestore document doesn't exist yet.
+      // This is the exact scenario that caused the production bug:
+      // syncWallet writes a partial update, and the next read must still
+      // return a valid WalletState with all fields present.
+      const result = await wallet.syncWallet(500_000, 0.1);
+
+      expect(result.discrepancy).toBe(true);
+      expect(result.quoteDiscrepancy).toBeCloseTo(500_000);
+      expect(result.baseDiscrepancy).toBeCloseTo(0.1);
+
+      // Wallet state must have all four fields populated
+      const state = await wallet.getState();
+      expect(state.availableQuote).toBe(500_000);
+      expect(state.availableBase).toBe(0.1);
+      expect(state.totalAllocatedQuote).toBe(0);
+      expect(state.totalAllocatedBase).toBe(0);
+    });
   });
 
   describe("getState", () => {

@@ -159,6 +159,32 @@ export class GridTickOrchestrator {
 
     this.logger.info("Grid tick started");
 
+    // Sync internal wallet with exchange balances
+    if (this.walletManager) {
+      try {
+        const balances = await this.client.getBalances();
+        // Treat missing currencies as zero — e.g. BTC won't appear until the account first holds some
+        const czkAvailable = balances.data["CZK"]?.available ?? 0;
+        const btcAvailable = balances.data["BTC"]?.available ?? 0;
+        const sync = await this.walletManager.syncWallet(czkAvailable, btcAvailable);
+        this.logger.info("Wallet synced with exchange", {
+          availableQuote: sync.walletState.availableQuote,
+          availableBase: sync.walletState.availableBase,
+          discrepancy: sync.discrepancy,
+        });
+        if (sync.discrepancy) {
+          this.logger.warn("Wallet discrepancy detected", {
+            quoteDiscrepancy: sync.quoteDiscrepancy,
+            baseDiscrepancy: sync.baseDiscrepancy,
+          });
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        this.logger.error("Wallet sync failed", { error: errMsg });
+        // Non-fatal — continue tick with stale wallet state
+      }
+    }
+
     const experiments = await this.repo.getExperimentsByStatus("active");
     this.logger.info(`Found ${experiments.length} active experiments`);
 
