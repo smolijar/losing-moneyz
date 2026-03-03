@@ -7,7 +7,7 @@ import type { ExchangeClient } from "../coinmate";
 import type { Repository } from "../storage";
 import { WalletManager } from "../storage";
 import { validateWithBacktest, type PriceTick } from "../backtest";
-import { suggestParams } from "./param-suggester";
+import { suggestParams, type SuggestResult, type SuggestSkip } from "./param-suggester";
 import type { Logger } from "../tick";
 
 /** Result of an autopilot engagement attempt */
@@ -146,13 +146,26 @@ export class Autopilot {
       return { action: "skipped", reason };
     }
 
+    if (isSuggestSkip(suggestion)) {
+      const reason = `Parameter suggestion skipped: ${suggestion.reason}`;
+      this.logger.warn(`Autopilot skipped: ${reason}`, {
+        pair: this.config.pair,
+        availableQuote: wallet.availableQuote,
+        trend: suggestion.trend,
+      });
+      await this.saveState(null, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    const suggested = suggestion;
+
     this.logger.info("Autopilot suggested config", {
-      config: suggestion.config,
-      metrics: suggestion.metrics,
+      config: suggested.config,
+      metrics: suggested.metrics,
     });
 
     // 7. Validate via backtest
-    const validation = validateWithBacktest(suggestion.config, ticks, {
+    const validation = validateWithBacktest(suggested.config, ticks, {
       minReturnPercent: this.config.backtestMinReturnPercent,
       maxDrawdownPercent: this.config.backtestMaxDrawdownPercent,
     });
@@ -160,7 +173,7 @@ export class Autopilot {
     if (!validation.approved) {
       const reason = `Backtest rejected: ${validation.reasons.join("; ")}`;
       this.logger.warn(`Autopilot skipped: ${reason}`);
-      await this.saveState(suggestion.config, `skipped:${reason}`);
+      await this.saveState(suggested.config, `skipped:${reason}`);
       return { action: "skipped", reason };
     }
 
@@ -173,8 +186,8 @@ export class Autopilot {
     // 8. Create experiment
     const experimentId = await this.repo.createExperiment({
       status: "active",
-      gridConfig: suggestion.config,
-      allocatedQuote: suggestion.config.budgetQuote,
+      gridConfig: suggested.config,
+      allocatedQuote: suggested.config.budgetQuote,
       allocatedBase: 0,
       consecutiveFailures: 0,
     });
@@ -182,7 +195,7 @@ export class Autopilot {
     // 9. Allocate wallet
     const allocation = await this.walletManager.allocateForExperiment(
       experimentId,
-      suggestion.config,
+      suggested.config,
     );
 
     if (!allocation.success) {
@@ -193,27 +206,27 @@ export class Autopilot {
       });
       await this.repo.updateExperimentStatus(experimentId, "stopped");
       const reason = `Wallet allocation failed: ${allocation.reason}`;
-      await this.saveState(suggestion.config, `skipped:${reason}`);
+      await this.saveState(suggested.config, `skipped:${reason}`);
       return { action: "skipped", reason };
     }
 
-    await this.saveState(suggestion.config, "created");
+    await this.saveState(suggested.config, "created");
 
     this.logger.info("Autopilot created experiment", {
       experimentId,
-      pair: suggestion.config.pair,
-      lowerPrice: suggestion.config.lowerPrice,
-      upperPrice: suggestion.config.upperPrice,
-      levels: suggestion.config.levels,
-      budgetQuote: suggestion.config.budgetQuote,
-      dailyVolatility: (suggestion.metrics.dailyVolatility * 100).toFixed(2) + "%",
+      pair: suggested.config.pair,
+      lowerPrice: suggested.config.lowerPrice,
+      upperPrice: suggested.config.upperPrice,
+      levels: suggested.config.levels,
+      budgetQuote: suggested.config.budgetQuote,
+      dailyVolatility: (suggested.metrics.dailyVolatility * 100).toFixed(2) + "%",
     });
 
     return {
       action: "created",
       reason: "Experiment created successfully",
       experimentId,
-      config: suggestion.config,
+      config: suggested.config,
     };
   }
 
@@ -237,4 +250,8 @@ export class Autopilot {
       });
     }
   }
+}
+
+function isSuggestSkip(value: SuggestResult | SuggestSkip): value is SuggestSkip {
+  return "skipped" in value && value.skipped === true;
 }

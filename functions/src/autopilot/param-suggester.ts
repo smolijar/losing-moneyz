@@ -25,6 +25,21 @@ export interface SuggestResult {
   };
 }
 
+/** A deliberate skip when market conditions are unsuitable for grid trading. */
+export interface SuggestSkip {
+  skipped: true;
+  reason: string;
+  trend?: TrendAnalysis;
+}
+
+/** Directionality analysis used to classify market regime for grid suitability. */
+export interface TrendAnalysis {
+  isTrending: boolean;
+  directionality: number;
+  consistency: number;
+  direction: "up" | "down" | "neutral";
+}
+
 /**
  * Resample raw trade ticks into fixed-interval OHLC candles.
  *
@@ -92,6 +107,83 @@ export function computeDailyVolatility(
 }
 
 /**
+ * Detect whether price action is strongly directional (trending), which is
+ * generally unsuitable for symmetric grid strategies.
+ */
+export function detectTrend(
+  candles: Array<{ close: number }>,
+  options: {
+    directionalityThreshold?: number;
+    consistencyThreshold?: number;
+  } = {},
+): TrendAnalysis {
+  const directionalityThreshold = options.directionalityThreshold ?? 0.7;
+  const consistencyThreshold = options.consistencyThreshold ?? 0.65;
+
+  if (candles.length < 3) {
+    return {
+      isTrending: false,
+      directionality: 0,
+      consistency: 0,
+      direction: "neutral",
+    };
+  }
+
+  const startPrice = candles[0].close;
+  const endPrice = candles[candles.length - 1].close;
+  const closes = candles.map((c) => c.close);
+  const high = Math.max(...closes);
+  const low = Math.min(...closes);
+  const range = high - low;
+
+  if (range <= 0 || startPrice <= 0 || endPrice <= 0) {
+    return {
+      isTrending: false,
+      directionality: 0,
+      consistency: 0,
+      direction: "neutral",
+    };
+  }
+
+  const netMove = endPrice - startPrice;
+  const direction: TrendAnalysis["direction"] =
+    netMove > 0 ? "up" : netMove < 0 ? "down" : "neutral";
+  const directionality = Math.min(1, Math.abs(netMove) / range);
+
+  if (direction === "neutral") {
+    return {
+      isTrending: false,
+      directionality,
+      consistency: 0,
+      direction,
+    };
+  }
+
+  let alignedMoves = 0;
+  let nonZeroMoves = 0;
+  const sign = Math.sign(netMove);
+  for (let i = 1; i < candles.length; i++) {
+    const delta = candles[i].close - candles[i - 1].close;
+    if (delta === 0) continue;
+    nonZeroMoves++;
+    if (Math.sign(delta) === sign) {
+      alignedMoves++;
+    }
+  }
+
+  const consistency = nonZeroMoves > 0 ? alignedMoves / nonZeroMoves : 0;
+  const isTrending =
+    directionality > directionalityThreshold && consistency > consistencyThreshold;
+
+  return {
+    isTrending,
+    directionality,
+    consistency,
+    direction,
+  };
+}
+
+/**
  * Suggest grid parameters based on recent price volatility and available capital.
  *
  * Algorithm:
@@ -107,7 +199,7 @@ export function suggestParams(
   ticks: PriceTick[],
   availableQuote: number,
   autopilotConfig: AutopilotConfig = AUTOPILOT_DEFAULTS,
-): SuggestResult | null {
+): SuggestResult | SuggestSkip | null {
   if (ticks.length < 10) return null;
 
   const adjustments: string[] = [];
@@ -131,6 +223,18 @@ export function suggestParams(
   if (dailyVol < minVolFloor) {
     dailyVol = minVolFloor;
     adjustments.push(`Volatility floored to ${(minVolFloor * 100).toFixed(2)}%`);
+  }
+
+  const trend = detectTrend(candles);
+  if (trend.isTrending) {
+    return {
+      skipped: true,
+      reason:
+        `strong ${trend.direction}trend detected ` +
+        `(directionality ${(trend.directionality * 100).toFixed(0)}%, ` +
+        `consistency ${(trend.consistency * 100).toFixed(0)}%)`,
+      trend,
+    };
   }
 
   // Step 3: Derive grid range

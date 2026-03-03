@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  detectTrend,
   resampleToCandles,
   computeDailyVolatility,
   suggestParams,
@@ -46,6 +47,15 @@ function makeOscillatingTicks(
     amount: 0.001,
     side: "buy" as const,
   }));
+}
+
+function expectSuggested(result: ReturnType<typeof suggestParams>) {
+  expect(result).not.toBeNull();
+  expect(result && !("skipped" in result)).toBe(true);
+  if (!result || "skipped" in result) {
+    throw new Error("Expected suggestParams to return a config suggestion");
+  }
+  return result;
 }
 
 // ─── resampleToCandles ────────────────────────────────────────────────────────
@@ -155,6 +165,53 @@ describe("computeDailyVolatility", () => {
   });
 });
 
+// ─── detectTrend ──────────────────────────────────────────────────────────────
+
+describe("detectTrend", () => {
+  it("returns non-trending for flat candles", () => {
+    const candles = Array.from({ length: 50 }, () => ({ close: 100 }));
+    const trend = detectTrend(candles);
+    expect(trend.isTrending).toBe(false);
+    expect(trend.direction).toBe("neutral");
+    expect(trend.directionality).toBe(0);
+  });
+
+  it("returns non-trending for oscillating candles", () => {
+    const candles = Array.from({ length: 120 }, (_, i) => ({
+      close: 100 + 5 * Math.sin((2 * Math.PI * i) / 20),
+    }));
+    const trend = detectTrend(candles);
+    expect(trend.isTrending).toBe(false);
+    expect(trend.directionality).toBeLessThan(0.7);
+  });
+
+  it("detects strong uptrend", () => {
+    const candles = Array.from({ length: 120 }, (_, i) => ({ close: 100 + i * 1.2 }));
+    const trend = detectTrend(candles);
+    expect(trend.isTrending).toBe(true);
+    expect(trend.direction).toBe("up");
+    expect(trend.directionality).toBeGreaterThan(0.7);
+    expect(trend.consistency).toBeGreaterThan(0.65);
+  });
+
+  it("detects strong downtrend", () => {
+    const candles = Array.from({ length: 120 }, (_, i) => ({ close: 400 - i * 2.0 }));
+    const trend = detectTrend(candles);
+    expect(trend.isTrending).toBe(true);
+    expect(trend.direction).toBe("down");
+    expect(trend.directionality).toBeGreaterThan(0.7);
+    expect(trend.consistency).toBeGreaterThan(0.65);
+  });
+
+  it("returns non-trending when movement is too mixed", () => {
+    const candles = Array.from({ length: 120 }, (_, i) => ({
+      close: 100 + i * 0.3 + 8 * Math.sin((2 * Math.PI * i) / 6),
+    }));
+    const trend = detectTrend(candles);
+    expect(trend.isTrending).toBe(false);
+  });
+});
+
 // ─── suggestParams ────────────────────────────────────────────────────────────
 
 describe("suggestParams", () => {
@@ -174,8 +231,7 @@ describe("suggestParams", () => {
     const ticks = makeOscillatingTicks(2_100_000, 2_300_000, 500);
     const result = suggestParams(ticks, 100_000);
 
-    expect(result).not.toBeNull();
-    const { config, metrics } = result!;
+    const { config, metrics } = expectSuggested(result);
 
     // Basic structure
     expect(config.pair).toBe("BTC_CZK");
@@ -200,9 +256,22 @@ describe("suggestParams", () => {
     const result = suggestParams(ticks, 100_000);
 
     // Should still produce a result (floored volatility)
-    expect(result).not.toBeNull();
-    const { metrics } = result!;
+    const { metrics } = expectSuggested(result);
     expect(metrics.adjustments.some((a: string) => a.includes("Volatility floored"))).toBe(true);
+  });
+
+  it("returns a skip reason for strongly trending markets", () => {
+    const prices = Array.from({ length: 500 }, (_, i) => 3_000_000 - i * 2_000);
+    const ticks = makeTicks(prices);
+    const result = suggestParams(ticks, 100_000);
+
+    expect(result).not.toBeNull();
+    expect(result && "skipped" in result).toBe(true);
+    if (!result || !("skipped" in result)) {
+      throw new Error("Expected suggestParams to skip in trending markets");
+    }
+    expect(result.reason).toContain("strong downtrend detected");
+    expect(result.trend?.isTrending).toBe(true);
   });
 
   it("clamps levels to maximum 50", () => {
@@ -216,7 +285,7 @@ describe("suggestParams", () => {
     };
     const result = suggestParams(ticks, 5_000_000, wideConfig);
 
-    if (result) {
+    if (result && !("skipped" in result)) {
       expect(result.config.levels).toBeLessThanOrEqual(50);
     }
   });
@@ -231,7 +300,7 @@ describe("suggestParams", () => {
     };
     const result = suggestParams(ticks, 100_000, tightConfig);
 
-    if (result) {
+    if (result && !("skipped" in result)) {
       expect(result.config.levels).toBeGreaterThanOrEqual(3);
       expect(result.metrics.adjustments.some((a: string) => a.includes("Levels clamped to minimum 3"))).toBe(true);
     }
@@ -250,7 +319,7 @@ describe("suggestParams", () => {
     const ticks = makeOscillatingTicks(2_190_000, 2_210_000, 500);
     const result = suggestParams(ticks, 100_000);
 
-    if (result) {
+    if (result && !("skipped" in result)) {
       // Whatever it returns should pass validation (internally tested)
       expect(result.config.lowerPrice).toBeLessThan(result.config.upperPrice);
       expect(result.config.levels).toBeGreaterThanOrEqual(3);
@@ -266,7 +335,7 @@ describe("suggestParams", () => {
     };
     const result = suggestParams(ticks, 100_000, customConfig);
 
-    if (result) {
+    if (result && !("skipped" in result)) {
       expect(result.config.pair).toBe("ETH_CZK");
     }
   });
@@ -276,8 +345,8 @@ describe("suggestParams", () => {
     const budget = 250_000;
     const result = suggestParams(ticks, budget);
 
-    expect(result).not.toBeNull();
-    expect(result!.config.budgetQuote).toBe(budget);
+    const suggested = expectSuggested(result);
+    expect(suggested.config.budgetQuote).toBe(budget);
   });
 
   it("handles very high volatility without crashing", () => {
@@ -285,7 +354,7 @@ describe("suggestParams", () => {
     const ticks = makeOscillatingTicks(500_000, 5_000_000, 500);
     const result = suggestParams(ticks, 500_000);
     // May return null or a valid config — shouldn't throw
-    if (result) {
+    if (result && !("skipped" in result)) {
       expect(result.config.levels).toBeGreaterThanOrEqual(3);
       expect(result.config.levels).toBeLessThanOrEqual(50);
     }
@@ -295,7 +364,7 @@ describe("suggestParams", () => {
     const ticks = makeOscillatingTicks(2_100_000, 2_300_000, 500);
     const result = suggestParams(ticks, 100_000);
 
-    if (result) {
+    if (result && !("skipped" in result)) {
       // COINMATE_FEES.maker * 2 * 100 * minSpacingMultiplier = 0.004 * 2 * 100 * 3 = 2.4%
       expect(result.metrics.desiredSpacingPercent).toBeGreaterThanOrEqual(2.4);
     }

@@ -105,6 +105,32 @@ function makeFlatTransactions(
   }));
 }
 
+/**
+ * Create a strongly directional transaction set for trend-skip testing.
+ */
+function makeTrendingTransactions(
+  startPrice: number,
+  stepPerMinute: number,
+  count: number,
+): Array<{
+  timestamp: number;
+  transactionId: number;
+  price: number;
+  amount: number;
+  currencyPair: string;
+  tradeType: "BUY" | "SELL";
+}> {
+  const baseTime = Date.now() - count * ONE_MIN;
+  return Array.from({ length: count }, (_, i) => ({
+    timestamp: baseTime + i * ONE_MIN,
+    transactionId: i + 1,
+    price: startPrice + i * stepPerMinute,
+    amount: 0.001,
+    currencyPair: "BTC_CZK",
+    tradeType: "BUY" as const,
+  }));
+}
+
 function createMockClient(
   overrides: Partial<ExchangeClient> = {},
 ): ExchangeClient {
@@ -539,6 +565,35 @@ describe("Autopilot", () => {
 
       expect(result.action).toBe("skipped");
       expect(result.reason).toContain("Parameter suggestion failed");
+    });
+
+    it("skips with trend reason and logs structured trend metrics", async () => {
+      const trendingDown = makeTrendingTransactions(3_000_000, -2_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: trendingDown,
+        }),
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("skipped");
+      expect(result.reason).toContain("Parameter suggestion skipped");
+      expect(result.reason).toContain("strong downtrend detected");
+
+      expect(noopLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("Autopilot skipped: Parameter suggestion skipped"),
+        expect.objectContaining({
+          pair: "BTC_CZK",
+          availableQuote: 100_000,
+          trend: expect.objectContaining({
+            isTrending: true,
+            direction: "down",
+          }),
+        }),
+      );
     });
   });
 
