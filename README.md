@@ -99,13 +99,29 @@ pnpm wallet:sync -- --fix
 
 ## Secrets Setup
 
-### GitHub Secrets (for CI/CD)
+### GCP Secret Manager (runtime secrets)
+
+Coinmate API credentials must be provisioned **once** directly in GCP Secret Manager.
+The Cloud Functions declare these secrets in their configuration, and Firebase auto-injects
+them as `process.env.*` at runtime.
 
 | Secret | Description |
 |--------|-------------|
 | `COINMATE_CLIENT_ID` | Coinmate API client ID |
 | `COINMATE_PUBLIC_KEY` | Coinmate API public key |
 | `COINMATE_PRIVATE_KEY` | Coinmate API private key |
+
+```bash
+# Create (first time only)
+gcloud secrets create COINMATE_CLIENT_ID --project="$PROJECT" --replication-policy="automatic"
+printf '%s' "$VALUE" | gcloud secrets versions add COINMATE_CLIENT_ID --project="$PROJECT" --data-file=-
+# Repeat for COINMATE_PUBLIC_KEY and COINMATE_PRIVATE_KEY
+```
+
+### GitHub Secrets (for CI/CD)
+
+| Secret | Description |
+|--------|-------------|
 | `FIREBASE_SERVICE_ACCOUNT` | Firebase service account JSON (for deployment) |
 
 ### GitHub Variables

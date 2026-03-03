@@ -47,19 +47,5 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Upsert Coinmate secrets in Secret Manager
-        env:
-          COINMATE_CLIENT_ID: ${{ secrets.COINMATE_CLIENT_ID }}
-          COINMATE_PUBLIC_KEY: ${{ secrets.COINMATE_PUBLIC_KEY }}
-          COINMATE_PRIVATE_KEY: ${{ secrets.COINMATE_PRIVATE_KEY }}
-        run: |
-          PROJECT="${{ vars.FIREBASE_PROJECT_ID }}"
-          for SECRET_NAME in COINMATE_CLIENT_ID COINMATE_PUBLIC_KEY COINMATE_PRIVATE_KEY; do
-            if ! gcloud secrets describe "$SECRET_NAME" --project="$PROJECT" >/dev/null 2>&1; then
-              gcloud secrets create "$SECRET_NAME" --project="$PROJECT" --replication-policy="automatic"
-            fi
-            printf '%s' "${!SECRET_NAME}" | gcloud secrets versions add "$SECRET_NAME" --project="$PROJECT" --data-file=-
-          done
-
       - name: Deploy to Firebase
         run: npx firebase-tools deploy --force --project "${{ vars.FIREBASE_PROJECT_ID }}"

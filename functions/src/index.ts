@@ -36,14 +36,20 @@ const COINMATE_SECRETS = [
 let _rateLimiter: RateLimiter | undefined;
 let _coinmateClient: CoinmateClient | undefined;
 
-function getCoinmateClient(): CoinmateClient {
-  const clientId = process.env.COINMATE_CLIENT_ID;
-  const publicKey = process.env.COINMATE_PUBLIC_KEY;
-  const privateKey = process.env.COINMATE_PRIVATE_KEY;
-
-  if (!clientId || !publicKey || !privateKey) {
-    throw new Error("Missing Coinmate API credentials in environment");
+function assertEnvSecret(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `Missing secret ${name} — ensure it exists in GCP Secret Manager and is accessible by the function's service account`,
+    );
   }
+  return value;
+}
+
+function getCoinmateClient(): CoinmateClient {
+  const clientId = assertEnvSecret("COINMATE_CLIENT_ID");
+  const publicKey = assertEnvSecret("COINMATE_PUBLIC_KEY");
+  const privateKey = assertEnvSecret("COINMATE_PRIVATE_KEY");
 
   if (!_rateLimiter) {
     _rateLimiter = new RateLimiter();
