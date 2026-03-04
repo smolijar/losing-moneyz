@@ -75,6 +75,9 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
   // Simulation state
   let quoteBalance = config.budgetQuote;
   let baseBalance = 0;
+  // Quote currency locked in open buy orders (not lost, just reserved).
+  // Must be included in portfolio valuation to avoid phantom drawdown.
+  let reservedQuote = 0;
   const budgetPerLevel = getBudgetPerLevel(config);
   let orderIdCounter = 0;
   const openOrders: Map<number, SimOrder> = new Map();
@@ -96,6 +99,7 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
       // Reserve quote for buy including fee so quote balance never goes negative on fill.
       if (quoteBalance >= buyCostWithFee) {
         quoteBalance -= buyCostWithFee;
+        reservedQuote += buyCostWithFee;
         const order: SimOrder = {
           id: ++orderIdCounter,
           side: "buy",
@@ -140,7 +144,8 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
 
       // Apply fill to balances
       if (order.side === "buy") {
-        // Quote (including fee buffer) was reserved when placing; now we only receive base.
+        // Quote (including fee buffer) was reserved when placing; release it now.
+        reservedQuote -= buyCostWithFee;
         baseBalance += order.amount;
       } else {
         // Sell: we release base and get quote
@@ -170,6 +175,7 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
           const amount = budgetPerLevel / counterLevel.price;
           if (quoteBalance >= buyCostWithFee) {
             quoteBalance -= buyCostWithFee;
+            reservedQuote += buyCostWithFee;
             const buyOrder: SimOrder = {
               id: ++orderIdCounter,
               side: "buy",
@@ -183,8 +189,9 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
       }
     }
 
-    // Track portfolio value for drawdown
-    const portfolioValue = quoteBalance + baseBalance * tick.price;
+    // Track portfolio value for drawdown.
+    // Include reservedQuote: funds locked in open buy orders are not lost.
+    const portfolioValue = quoteBalance + reservedQuote + baseBalance * tick.price;
     if (portfolioValue > peakValue) {
       peakValue = portfolioValue;
     }
@@ -202,9 +209,9 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
     }
   }
 
-  // Final calculations
+  // Final calculations — include reservedQuote (funds in open buy orders)
   const lastPrice = ticks[ticks.length - 1].price;
-  const endingQuote = quoteBalance;
+  const endingQuote = quoteBalance + reservedQuote;
   const endingBase = baseBalance;
   const endingValue = endingQuote + endingBase * lastPrice;
   const totalReturn = endingValue - config.budgetQuote;
@@ -313,9 +320,9 @@ export function validateWithBacktest(
     );
   }
 
-  if (report.completedCycles === 0) {
-    reasons.push("No completed trade cycles in backtest period");
-  }
+  // Note: completedCycles === 0 is NOT a rejection criterion.
+  // In trending markets the grid may not complete a full buy→sell cycle during
+  // the lookback window, but the config can still be valid for range-bound trading.
 
   return {
     approved: reasons.length === 0,

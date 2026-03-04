@@ -117,8 +117,8 @@ export function detectTrend(
     consistencyThreshold?: number;
   } = {},
 ): TrendAnalysis {
-  const directionalityThreshold = options.directionalityThreshold ?? 0.7;
-  const consistencyThreshold = options.consistencyThreshold ?? 0.65;
+  const directionalityThreshold = options.directionalityThreshold ?? 0.85;
+  const consistencyThreshold = options.consistencyThreshold ?? 0.75;
 
   if (candles.length < 3) {
     return {
@@ -173,8 +173,7 @@ export function detectTrend(
 
   const consistency = nonZeroMoves > 0 ? alignedMoves / nonZeroMoves : 0;
   const isTrending =
-    (directionality > directionalityThreshold && consistency > consistencyThreshold) ||
-    (directionality > 0.9 && consistency > 0.5);
+    directionality > directionalityThreshold && consistency > consistencyThreshold;
 
   return {
     isTrending,

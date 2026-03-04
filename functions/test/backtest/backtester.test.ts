@@ -299,12 +299,14 @@ describe("validateWithBacktest", () => {
     expect(result.reasons.some((r) => r.includes("Return"))).toBe(true);
   });
 
-  it("rejects when no cycles complete", () => {
+  it("does not reject solely because no cycles complete", () => {
     const ticks = generateFlatTicks(2_200_000, 500);
     const result = validateWithBacktest(defaultConfig, ticks);
 
-    expect(result.approved).toBe(false);
-    expect(result.reasons.some((r) => r.includes("No completed trade cycles"))).toBe(true);
+    // completedCycles === 0 is no longer a rejection reason on its own.
+    // The config may still be rejected for other reasons (return / drawdown),
+    // but the "No completed trade cycles" string must not appear.
+    expect(result.reasons.some((r) => r.includes("No completed trade cycles"))).toBe(false);
   });
 
   it("approves a profitable config on oscillating market", () => {

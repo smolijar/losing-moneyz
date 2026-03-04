@@ -250,8 +250,10 @@ export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
   rangeMultiplier: 2.0,
   spacingMultiplier: 1.5,
   minHistoryMinutes: 1440, // 24 hours
-  backtestMinReturnPercent: -5, // permissive — just avoid disasters
-  backtestMaxDrawdownPercent: 15,
+  backtestMinReturnPercent: -15, // permissive — grid profits come from oscillation over time,
+  // not from a single trending lookback window
+  backtestMaxDrawdownPercent: 30, // with correct accounting drawdown is realistic;
+  // live safeguards (10%) still protect real capital
   cooldownMinutes: 10,
   minBudgetQuote: 500,
 };

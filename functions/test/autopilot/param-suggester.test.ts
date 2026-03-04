@@ -211,7 +211,7 @@ describe("detectTrend", () => {
     expect(trend.isTrending).toBe(false);
   });
 
-  it("flags extreme directionality even with moderate consistency", () => {
+  it("does not flag moderate consistency as trending with raised thresholds", () => {
     const candles = Array.from({ length: 200 }, (_, i) => ({
       close: 1000 - i * 1.8 + (i % 3 === 0 ? 3.0 : -0.8),
     }));
@@ -219,7 +219,10 @@ describe("detectTrend", () => {
     expect(trend.direction).toBe("down");
     expect(trend.directionality).toBeGreaterThan(0.9);
     expect(trend.consistency).toBeGreaterThan(0.5);
-    expect(trend.isTrending).toBe(true);
+    // With raised thresholds (0.85/0.75) and no 0.9/0.5 override,
+    // moderate consistency (~0.67) no longer triggers trend skip.
+    expect(trend.consistency).toBeLessThan(0.75);
+    expect(trend.isTrending).toBe(false);
   });
 });
 
