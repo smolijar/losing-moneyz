@@ -173,7 +173,8 @@ export function detectTrend(
 
   const consistency = nonZeroMoves > 0 ? alignedMoves / nonZeroMoves : 0;
   const isTrending =
-    directionality > directionalityThreshold && consistency > consistencyThreshold;
+    (directionality > directionalityThreshold && consistency > consistencyThreshold) ||
+    (directionality > 0.9 && consistency > 0.5);
 
   return {
     isTrending,

@@ -70,6 +70,7 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
 
   const gridLevels = calculateGridLevels(config);
   const feeRate = COINMATE_FEES.maker;
+  const buyCostWithFee = budgetForOrderWithFee(getBudgetPerLevel(config), feeRate);
 
   // Simulation state
   let quoteBalance = config.budgetQuote;
@@ -92,9 +93,9 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
   for (const level of gridLevels) {
     if (level.price < startPrice) {
       const amount = budgetPerLevel / level.price;
-      // Reserve quote for buy
-      if (quoteBalance >= budgetPerLevel) {
-        quoteBalance -= budgetPerLevel;
+      // Reserve quote for buy including fee so quote balance never goes negative on fill.
+      if (quoteBalance >= buyCostWithFee) {
+        quoteBalance -= buyCostWithFee;
         const order: SimOrder = {
           id: ++orderIdCounter,
           side: "buy",
@@ -139,10 +140,8 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
 
       // Apply fill to balances
       if (order.side === "buy") {
-        // We already reserved the quote when placing; now we get base
-        const fee = order.price * order.amount * feeRate;
+        // Quote (including fee buffer) was reserved when placing; now we only receive base.
         baseBalance += order.amount;
-        quoteBalance -= fee; // fee on buy
       } else {
         // Sell: we release base and get quote
         const quoteReceived = order.price * order.amount;
@@ -169,8 +168,8 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
         } else {
           // Counter buy at next level down
           const amount = budgetPerLevel / counterLevel.price;
-          if (quoteBalance >= budgetPerLevel) {
-            quoteBalance -= budgetPerLevel;
+          if (quoteBalance >= buyCostWithFee) {
+            quoteBalance -= buyCostWithFee;
             const buyOrder: SimOrder = {
               id: ++orderIdCounter,
               side: "buy",
@@ -240,6 +239,10 @@ export function runBacktest(config: GridConfig, ticks: PriceTick[]): BacktestRep
     profitable: totalReturn > 0,
     pnlTimeseries,
   };
+}
+
+function budgetForOrderWithFee(budgetPerLevel: number, feeRate: number): number {
+  return budgetPerLevel * (1 + feeRate);
 }
 
 /** Check if there's already an order at a given grid level */

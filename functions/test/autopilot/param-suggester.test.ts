@@ -210,6 +210,17 @@ describe("detectTrend", () => {
     const trend = detectTrend(candles);
     expect(trend.isTrending).toBe(false);
   });
+
+  it("flags extreme directionality even with moderate consistency", () => {
+    const candles = Array.from({ length: 200 }, (_, i) => ({
+      close: 1000 - i * 1.8 + (i % 3 === 0 ? 3.0 : -0.8),
+    }));
+    const trend = detectTrend(candles);
+    expect(trend.direction).toBe("down");
+    expect(trend.directionality).toBeGreaterThan(0.9);
+    expect(trend.consistency).toBeGreaterThan(0.5);
+    expect(trend.isTrending).toBe(true);
+  });
 });
 
 // ─── suggestParams ────────────────────────────────────────────────────────────

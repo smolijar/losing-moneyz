@@ -160,6 +160,13 @@ describe("runBacktest", () => {
     expect(report.maxDrawdownPercent).toBeLessThanOrEqual(100);
   });
 
+  it("never drives quote balance negative in monotonic selloff", () => {
+    const ticks = generateTrendingDownTicks(2_400_000, 1_600_000, 500);
+    const report = runBacktest(defaultConfig, ticks);
+
+    expect(report.endingQuote).toBeGreaterThanOrEqual(0);
+  });
+
   it("oscillating market with good spacing is profitable", () => {
     // Wide grid with decent spread should profit from oscillation
     const config: GridConfig = {
