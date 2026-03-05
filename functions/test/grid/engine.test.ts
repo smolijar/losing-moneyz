@@ -788,10 +788,12 @@ describe("reconcileOrders availableQuote constraint", () => {
     const uncBuys = unconstrained.filter((a) => a.type === "place" && a.side === "buy");
     expect(uncBuys.length).toBe(3);
 
-    // Provide only enough quote for ~1 buy
-    const firstBuyCost = uncBuys[0].type === "place" ? uncBuys[0].amount * uncBuys[0].price : 0;
+    // Provide only enough quote for ~1 buy (including fee reservation)
+    const feeRate = 0.004;
+    const firstBuyCost =
+      uncBuys[0].type === "place" ? uncBuys[0].amount * uncBuys[0].price * (1 + feeRate) : 0;
     const constrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
-      feeRate: 0.004,
+      feeRate,
       availableQuote: firstBuyCost,
     });
     const conBuys = constrained.filter((a) => a.type === "place" && a.side === "buy");
@@ -828,19 +830,21 @@ describe("reconcileOrders availableQuote constraint", () => {
   });
 
   it("decrements remaining quote across multiple buys", () => {
-    // Provide exactly enough for 2 of the 3 buys
+    // Provide exactly enough for 2 of the 3 buys (including fee reservation)
+    const feeRate = 0.004;
     const unconstrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
-      feeRate: 0.004,
+      feeRate,
     });
     const uncBuys = unconstrained.filter((a) => a.type === "place" && a.side === "buy");
 
     let firstTwoCost = 0;
     for (let i = 0; i < 2 && i < uncBuys.length; i++) {
-      if (uncBuys[i].type === "place") firstTwoCost += uncBuys[i].amount * uncBuys[i].price;
+      if (uncBuys[i].type === "place")
+        firstTwoCost += uncBuys[i].amount * uncBuys[i].price * (1 + feeRate);
     }
 
     const constrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
-      feeRate: 0.004,
+      feeRate,
       availableQuote: firstTwoCost,
     });
     const conBuys = constrained.filter((a) => a.type === "place" && a.side === "buy");

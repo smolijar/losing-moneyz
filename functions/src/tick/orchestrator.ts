@@ -1,5 +1,5 @@
 import type { Experiment, ExperimentSnapshot, AutopilotConfig } from "../config";
-import { COINMATE_FEES } from "../config";
+import { COINMATE_FEES, PAIR_LIMITS } from "../config";
 import { CoinmateApiError, type ExchangeClient } from "../coinmate";
 import {
   calculateGridLevels,
@@ -451,6 +451,22 @@ export class GridTickOrchestrator {
           availableQuote,
         },
       );
+
+      // 7b. Warn if budget is too low to meet minimum order size
+      const placeActions = actions.filter((a) => a.type === "place");
+      if (placeActions.length === 0 && matchedOrders.length < gridLevels.length) {
+        const limits = PAIR_LIMITS[pair];
+        const amountAtCurrentPrice = budgetPerLevel / currentPrice;
+        if (amountAtCurrentPrice < limits.minOrderSize) {
+          this.logger.warn("Budget too low to place orders", {
+            experimentId: experiment.id,
+            budgetPerLevel: Math.round(budgetPerLevel * 100) / 100,
+            amountAtCurrentPrice: +amountAtCurrentPrice.toFixed(limits.basePrecision),
+            minOrderSize: limits.minOrderSize,
+            pair,
+          });
+        }
+      }
 
       // 8. Execute order actions
       for (const action of actions) {

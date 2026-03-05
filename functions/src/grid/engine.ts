@@ -213,8 +213,9 @@ export function reconcileOrders(
       const amount = roundAmount(rawAmount, pair);
       if (amount <= 0) continue;
 
-      // Enforce available quote constraint
-      const orderCost = amount * level.price;
+      // Enforce available quote constraint (include fee — the exchange locks
+      // price * amount * (1 + feeRate) when placing a limit buy)
+      const orderCost = amount * level.price * (1 + feeRate);
       if (remainingQuote !== undefined) {
         if (remainingQuote < orderCost) {
           // Not enough quote to place this buy — skip

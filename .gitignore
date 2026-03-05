@@ -7,3 +7,4 @@ firebase-debug.log
 firebase-debug.*.log
 *.local
 .firebase/
+.service-account.json
