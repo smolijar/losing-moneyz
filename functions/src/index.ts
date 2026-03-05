@@ -15,9 +15,9 @@ if (getApps().length === 0) {
 
 /** Adapter: Firebase logger → orchestrator Logger interface */
 const tickLogger: Logger = {
-  info: (msg, data) => logger.info(msg, data),
-  warn: (msg, data) => logger.warn(msg, data),
-  error: (msg, data) => logger.error(msg, data),
+  info: (msg, data) => logger.info(msg, data ?? {}),
+  warn: (msg, data) => logger.warn(msg, data ?? {}),
+  error: (msg, data) => logger.error(msg, data ?? {}),
 };
 
 // ─── GCP Secret Manager secret names ───────────────────────────────────────
@@ -95,11 +95,7 @@ export const gridTick = onSchedule(
   },
   async () => {
     try {
-      const result = await executeGridTick();
-      logger.info("Grid tick completed", {
-        durationMs: result.totalDurationMs,
-        experiments: result.experimentResults.length,
-      });
+      await executeGridTick();
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error("Grid tick failed", { error: errMsg });

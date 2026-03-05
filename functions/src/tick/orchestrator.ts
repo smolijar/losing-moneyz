@@ -166,7 +166,14 @@ export class GridTickOrchestrator {
         // Treat missing currencies as zero — e.g. BTC won't appear until the account first holds some
         const czkAvailable = balances.data["CZK"]?.available ?? 0;
         const btcAvailable = balances.data["BTC"]?.available ?? 0;
-        const sync = await this.walletManager.syncWallet(czkAvailable, btcAvailable);
+        const czkReserved = balances.data["CZK"]?.reserved ?? 0;
+        const btcReserved = balances.data["BTC"]?.reserved ?? 0;
+        const sync = await this.walletManager.syncWallet(
+          czkAvailable,
+          btcAvailable,
+          czkReserved,
+          btcReserved,
+        );
         this.logger.info("Wallet synced with exchange", {
           availableQuote: sync.walletState.availableQuote,
           availableBase: sync.walletState.availableBase,
@@ -407,10 +414,11 @@ export class GridTickOrchestrator {
           availableQuote += value * (1 - feeRate); // received quote - fee
         }
       }
-      // Subtract quote committed in existing open buy orders
+      // Subtract quote committed in existing open buy orders (including fee reservation —
+      // the exchange locks price*amount*(1+fee) when a limit buy is placed)
       for (const order of matchedOrders) {
         if (order.side === "buy") {
-          availableQuote -= order.price * order.amount;
+          availableQuote -= order.price * order.amount * (1 + feeRate);
         }
       }
 

@@ -93,10 +93,17 @@ export class WalletManager {
   /**
    * Sync wallet state with actual Coinmate balances.
    * Detects discrepancies and returns them.
+   *
+   * @param actualQuote - Available (unlocked) quote balance on the exchange
+   * @param actualBase - Available (unlocked) base balance on the exchange
+   * @param lockedQuote - Quote amount locked in open orders on the exchange (default 0)
+   * @param lockedBase - Base amount locked in open orders on the exchange (default 0)
    */
   async syncWallet(
     actualQuote: number,
     actualBase: number,
+    lockedQuote: number = 0,
+    lockedBase: number = 0,
   ): Promise<{
     discrepancy: boolean;
     quoteDiscrepancy: number;
@@ -107,14 +114,19 @@ export class WalletManager {
     const expectedQuote = wallet.availableQuote + wallet.totalAllocatedQuote;
     const expectedBase = wallet.availableBase + wallet.totalAllocatedBase;
 
-    const quoteDiscrepancy = actualQuote - expectedQuote;
-    const baseDiscrepancy = actualBase - expectedBase;
+    // The exchange's "available" excludes funds locked in open orders.
+    // Add locked amounts back to get the true total on the exchange.
+    const totalExchangeQuote = actualQuote + lockedQuote;
+    const totalExchangeBase = actualBase + lockedBase;
+
+    const quoteDiscrepancy = totalExchangeQuote - expectedQuote;
+    const baseDiscrepancy = totalExchangeBase - expectedBase;
 
     // Update available to match actual minus allocated
     if (Math.abs(quoteDiscrepancy) > 0.01 || Math.abs(baseDiscrepancy) > 0.00000001) {
       await this.repo.updateWalletState({
-        availableQuote: actualQuote - wallet.totalAllocatedQuote,
-        availableBase: actualBase - wallet.totalAllocatedBase,
+        availableQuote: totalExchangeQuote - wallet.totalAllocatedQuote,
+        availableBase: totalExchangeBase - wallet.totalAllocatedBase,
         totalAllocatedQuote: wallet.totalAllocatedQuote,
         totalAllocatedBase: wallet.totalAllocatedBase,
       });
