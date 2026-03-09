@@ -81,14 +81,41 @@ export class Autopilot {
       return { action: "skipped", reason: "stopped experiments pending cleanup" };
     }
 
-    // 3. Clean up paused experiments (release wallet)
+    // 3. Clean up paused experiments. If they still have open orders, promote
+    // them to stopped so the orchestrator cancels exchange orders first.
     const paused = await this.repo.getExperimentsByStatus("paused");
     for (const exp of paused) {
+      const openOrders = await this.repo.getOrdersByStatus(exp.id, "open");
+      if (openOrders.length > 0) {
+        this.logger.warn("Autopilot found paused experiment with open orders", {
+          experimentId: exp.id,
+          openOrders: openOrders.length,
+        });
+        await this.repo.updateExperimentStatus(exp.id, "stopped");
+        await this.repo.updateAutopilotState({
+          lastReason: `paused experiment ${exp.id} has open orders`,
+          lastSupervisorDecision: "paused_promoted_to_stopped",
+        });
+        return { action: "skipped", reason: "paused experiments pending order cleanup" };
+      }
+
       if (exp.allocatedQuote > 0 || exp.allocatedBase > 0) {
         this.logger.info("Autopilot releasing wallet for paused experiment", {
           experimentId: exp.id,
         });
         await this.walletManager.releaseForExperiment(exp.id);
+      }
+    }
+
+    // 3b. Double-check that no paused experiments still have open orders after cleanup.
+    for (const exp of paused) {
+      const openOrders = await this.repo.getOrdersByStatus(exp.id, "open");
+      if (openOrders.length > 0) {
+        this.logger.info("Autopilot waiting: paused experiments still have open orders", {
+          experimentId: exp.id,
+          openOrders: openOrders.length,
+        });
+        return { action: "skipped", reason: "paused experiments pending order cleanup" };
       }
     }
 

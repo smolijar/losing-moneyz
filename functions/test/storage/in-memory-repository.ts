@@ -188,6 +188,27 @@ export class InMemoryRepository implements Repository {
     this.wallet.availableBase += baseDelta;
   }
 
+  async releaseExperimentAllocation(
+    experimentId: string,
+  ): Promise<{ quoteReleased: number; baseReleased: number }> {
+    const exp = this.experiments.get(experimentId);
+    if (!exp) throw new Error(`Experiment ${experimentId} not found`);
+
+    const quoteReleased = exp.allocatedQuote;
+    const baseReleased = exp.allocatedBase;
+
+    this.wallet.totalAllocatedQuote = Math.max(0, this.wallet.totalAllocatedQuote - quoteReleased);
+    this.wallet.totalAllocatedBase = Math.max(0, this.wallet.totalAllocatedBase - baseReleased);
+    this.wallet.availableQuote += quoteReleased;
+    this.wallet.availableBase += baseReleased;
+
+    exp.allocatedQuote = 0;
+    exp.allocatedBase = 0;
+    exp.updatedAt = new Date();
+
+    return { quoteReleased, baseReleased };
+  }
+
   async runTransaction<T>(fn: (repo: Repository) => Promise<T>): Promise<T> {
     // InMemory implementation: just execute directly (no real transaction support)
     return fn(this);

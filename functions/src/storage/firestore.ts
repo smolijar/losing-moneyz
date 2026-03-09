@@ -281,6 +281,52 @@ export class FirestoreRepository implements Repository {
     });
   }
 
+  async releaseExperimentAllocation(
+    experimentId: string,
+  ): Promise<{ quoteReleased: number; baseReleased: number }> {
+    return this.db.runTransaction(async (tx) => {
+      const walletRef = this.walletDoc();
+      const experimentRef = this.experimentsCol().doc(experimentId);
+
+      const [walletDoc, experimentDoc] = await Promise.all([tx.get(walletRef), tx.get(experimentRef)]);
+      if (!experimentDoc.exists) {
+        throw new Error(`Experiment ${experimentId} not found`);
+      }
+
+      const experiment = this.toExperiment(experimentDoc.id, experimentDoc.data()!);
+      const current: WalletState = walletDoc.exists
+        ? WalletStateDocSchema.parse(walletDoc.data())
+        : {
+            totalAllocatedQuote: 0,
+            totalAllocatedBase: 0,
+            availableQuote: 0,
+            availableBase: 0,
+          };
+
+      const quoteReleased = experiment.allocatedQuote;
+      const baseReleased = experiment.allocatedBase;
+
+      tx.set(
+        walletRef,
+        {
+          totalAllocatedQuote: Math.max(0, current.totalAllocatedQuote - quoteReleased),
+          totalAllocatedBase: Math.max(0, current.totalAllocatedBase - baseReleased),
+          availableQuote: current.availableQuote + quoteReleased,
+          availableBase: current.availableBase + baseReleased,
+        },
+        { merge: false },
+      );
+
+      tx.update(experimentRef, {
+        allocatedQuote: 0,
+        allocatedBase: 0,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      return { quoteReleased, baseReleased };
+    });
+  }
+
   async runTransaction<T>(fn: (repo: Repository) => Promise<T>): Promise<T> {
     // For Firestore, we pass `this` since individual methods already
     // use Firestore transactions where needed (wallet ops).

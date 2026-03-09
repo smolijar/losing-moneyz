@@ -242,6 +242,24 @@ export interface AutopilotConfig {
   cooldownMinutes: number;
   /** Minimum viable budget in quote currency (below this, skip) */
   minBudgetQuote: number;
+  /** Enable automatic recycling of stale experiments */
+  enableStallAutofix: boolean;
+  /** Recycle never-filled entry grids after this many minutes off-market */
+  stalledEntryMinutes: number;
+  /** Recycle previously active grids after this many quiet minutes off-market */
+  stalledActiveMinutes: number;
+  /** Minimum absolute off-market distance (percent) before recycling */
+  stalledPriceGapPercent: number;
+  /** Minimum off-market distance in grid spacings before recycling */
+  stalledGridSpacingMultiplier: number;
+  /** Require this many quiet minutes since last fill before proactive replacement */
+  recentFillQuietPeriodMinutes: number;
+  /** Minimum capital increase required before considering a replacement */
+  capitalIncreaseThresholdPercent: number;
+  /** Minimum minutes between proactive replacement actions */
+  regridCooldownMinutes: number;
+  /** Minimum backtest improvement score required before replacing */
+  replacementImprovementThreshold: number;
 }
 
 /** Default autopilot configuration */
@@ -256,6 +274,15 @@ export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
   // live safeguards (10%) still protect real capital
   cooldownMinutes: 10,
   minBudgetQuote: 500,
+  enableStallAutofix: true,
+  stalledEntryMinutes: 60,
+  stalledActiveMinutes: 180,
+  stalledPriceGapPercent: 1,
+  stalledGridSpacingMultiplier: 1,
+  recentFillQuietPeriodMinutes: 90,
+  capitalIncreaseThresholdPercent: 20,
+  regridCooldownMinutes: 360,
+  replacementImprovementThreshold: 5,
 };
 
 /** Autopilot state persisted to Firestore */
@@ -268,6 +295,12 @@ export interface AutopilotState {
   lastReason?: string;
   /** Kill switch — set to false to disable autopilot */
   enabled: boolean;
+  /** Last autonomous supervisor decision metadata */
+  lastSupervisorDecision?: string;
+  /** When the supervisor last replaced or recycled an experiment */
+  lastReplacementAt?: Date;
+  /** Percent capital increase seen during the last evaluation */
+  lastCapitalIncreasePercent?: number;
 }
 
 /** Schema for AutopilotState document data */
@@ -276,4 +309,7 @@ export const AutopilotStateDocSchema = z.object({
   lastConfig: GridConfig.nullable().default(null).optional(),
   lastReason: z.string().optional(),
   enabled: z.boolean().default(true),
+  lastSupervisorDecision: z.string().optional(),
+  lastReplacementAt: FirestoreDate.optional(),
+  lastCapitalIncreasePercent: z.number().optional(),
 });

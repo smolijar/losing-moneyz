@@ -101,6 +101,14 @@ export interface Repository {
   releaseWallet(quoteDelta: number, baseDelta: number): Promise<void>;
 
   /**
+   * Atomically release an experiment's allocation back to the wallet and zero
+   * the experiment allocation fields.
+   */
+  releaseExperimentAllocation(
+    experimentId: string,
+  ): Promise<{ quoteReleased: number; baseReleased: number }>;
+
+  /**
    * Run a callback inside a transaction (read-then-write atomicity).
    * Implementations that don't support real transactions (e.g. InMemory) may
    * simply execute the callback directly.

@@ -336,6 +336,52 @@ describe("Autopilot", () => {
       const exp = await repo.getExperiment(expId);
       expect(exp!.allocatedQuote).toBe(0);
     });
+
+    it("promotes paused experiments with open orders to stopped", async () => {
+      const expId = await repo.createExperiment({
+        status: "paused",
+        gridConfig: {
+          pair: "BTC_CZK",
+          lowerPrice: 2_000_000,
+          upperPrice: 2_400_000,
+          levels: 5,
+          budgetQuote: 50_000,
+        },
+        allocatedQuote: 50_000,
+        allocatedBase: 0,
+        consecutiveFailures: 0,
+      });
+      await repo.createOrder(expId, {
+        coinmateOrderId: "3816395949",
+        side: "buy",
+        price: 2_000_000,
+        amount: 0.001,
+        status: "open",
+        gridLevel: 0,
+        createdAt: new Date(),
+      });
+      repo.setWallet({
+        totalAllocatedQuote: 50_000,
+        totalAllocatedBase: 0,
+        availableQuote: 0,
+        availableBase: 0,
+      });
+
+      const client = createMockClient();
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("skipped");
+      expect(result.reason).toContain("order cleanup");
+
+      const exp = await repo.getExperiment(expId);
+      expect(exp!.status).toBe("stopped");
+
+      const wallet = await walletManager.getState();
+      expect(wallet.totalAllocatedQuote).toBe(50_000);
+      expect(wallet.availableQuote).toBe(0);
+    });
   });
 
   // ─── Insufficient capital ──────────────────────────────────────────

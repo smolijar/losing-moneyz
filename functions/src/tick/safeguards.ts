@@ -16,12 +16,15 @@ export interface SafeguardConfig {
   maxConsecutiveApiFailures: number;
   /** Maximum time since last successful tick (ms) before stale warning */
   staleTicThresholdMs: number;
+  /** Maximum time without any fills (ms) before pausing to allow Autopilot to recalibrate */
+  maxIdleTimeMs: number;
 }
 
 export const DEFAULT_SAFEGUARD_CONFIG: SafeguardConfig = {
   maxDrawdownPercent: 10,
   maxConsecutiveApiFailures: 3,
   staleTicThresholdMs: 10 * 60 * 1000, // 10 minutes
+  maxIdleTimeMs: 3 * 24 * 60 * 60 * 1000, // 3 days
 };
 
 /**
@@ -165,6 +168,37 @@ export function checkMaxOrders(
 }
 
 /**
+ * Check if the experiment has been idle (no fills) for too long.
+ */
+export function checkIdleTime(
+  experiment: Experiment,
+  fills: FillEvent[] = [],
+  now: Date = new Date(),
+  config: SafeguardConfig = DEFAULT_SAFEGUARD_CONFIG,
+): SafeguardResult {
+  // Find the most recent fill timestamp, or fall back to experiment creation time
+  let lastActivityMs = experiment.createdAt.getTime();
+  for (const fill of fills) {
+    if (fill.timestamp > lastActivityMs) {
+      lastActivityMs = fill.timestamp;
+    }
+  }
+
+  const elapsedMs = now.getTime() - lastActivityMs;
+  if (elapsedMs > config.maxIdleTimeMs) {
+    return {
+      ok: false,
+      action: "pause",
+      reason:
+        `Experiment idle for ${(elapsedMs / 86400000).toFixed(1)} days ` +
+        `(limit: ${(config.maxIdleTimeMs / 86400000).toFixed(1)} days)`,
+    };
+  }
+
+  return { ok: true, action: "continue" };
+}
+
+/**
  * Run all safeguards for an experiment.
  * Returns the most severe result.
  *
@@ -187,6 +221,7 @@ export function runAllSafeguards(
     checkStaleTick(lastSnapshot, now, config),
     checkCircuitBreaker(consecutiveFailures, config),
     checkMaxOrders(openOrderCount, experiment.gridConfig.levels),
+    checkIdleTime(experiment, fills, now, config),
   ];
 
   const shouldPause = results.some((r) => r.action === "pause");

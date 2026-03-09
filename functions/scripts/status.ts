@@ -70,6 +70,28 @@ async function main() {
   console.log(`=== Wallet ===`);
   console.log(`  Allocated: ${wallet.totalAllocatedQuote.toLocaleString()} CZK / ${wallet.totalAllocatedBase} BTC`);
   console.log(`  Available: ${wallet.availableQuote.toLocaleString()} CZK / ${wallet.availableBase} BTC`);
+
+  const autopilotState = await repo.getAutopilotState();
+  if (autopilotState) {
+    console.log();
+    console.log(`=== Supervisor ===`);
+    console.log(`  Enabled:   ${autopilotState.enabled ? "yes" : "no"}`);
+    if (autopilotState.lastReason) {
+      console.log(`  Reason:    ${autopilotState.lastReason}`);
+    }
+    if (autopilotState.lastSupervisorDecision) {
+      console.log(`  Decision:  ${autopilotState.lastSupervisorDecision}`);
+    }
+    if (autopilotState.lastCapitalIncreasePercent !== undefined) {
+      console.log(`  Capital+:  ${autopilotState.lastCapitalIncreasePercent.toFixed(2)}%`);
+    }
+    if (autopilotState.lastActionAt) {
+      console.log(`  Last act:  ${autopilotState.lastActionAt.toISOString()}`);
+    }
+    if (autopilotState.lastReplacementAt) {
+      console.log(`  Last swap: ${autopilotState.lastReplacementAt.toISOString()}`);
+    }
+  }
 }
 
 main().catch((err) => {

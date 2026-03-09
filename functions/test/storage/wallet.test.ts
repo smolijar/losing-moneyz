@@ -131,6 +131,33 @@ describe("WalletManager", () => {
       expect(result.success).toBe(false);
       expect(result.reason).toContain("not found");
     });
+
+    it("atomically releases wallet and zeroes experiment allocation", async () => {
+      repo.setWallet({
+        totalAllocatedQuote: 100_000,
+        totalAllocatedBase: 0.01,
+        availableQuote: 50_000,
+        availableBase: 0.02,
+      });
+
+      const expId = await repo.createExperiment({
+        status: "stopped",
+        gridConfig,
+        allocatedQuote: 100_000,
+        allocatedBase: 0.01,
+      });
+
+      await wallet.releaseForExperiment(expId);
+
+      const state = await wallet.getState();
+      const exp = await repo.getExperiment(expId);
+      expect(state.totalAllocatedQuote).toBe(0);
+      expect(state.totalAllocatedBase).toBe(0);
+      expect(state.availableQuote).toBe(150_000);
+      expect(state.availableBase).toBe(0.03);
+      expect(exp!.allocatedQuote).toBe(0);
+      expect(exp!.allocatedBase).toBe(0);
+    });
   });
 
   describe("initializeWallet", () => {
@@ -247,6 +274,74 @@ describe("WalletManager", () => {
       const state = await wallet.getState();
       expect(state.totalAllocatedQuote).toBe(50_000);
       expect(state.availableQuote).toBe(150_000);
+    });
+  });
+
+  describe("reconcileAllocations", () => {
+    it("repairs drifted allocated totals", async () => {
+      repo.setWallet({
+        totalAllocatedQuote: 200_000,
+        totalAllocatedBase: 0.02,
+        availableQuote: 100_000,
+        availableBase: 0.03,
+      });
+
+      const exp1 = await repo.createExperiment({
+        status: "active",
+        gridConfig,
+        allocatedQuote: 100_000,
+        allocatedBase: 0.01,
+      });
+      await repo.createExperiment({
+        status: "paused",
+        gridConfig,
+        allocatedQuote: 50_000,
+        allocatedBase: 0,
+      });
+      await repo.createExperiment({
+        status: "stopped",
+        gridConfig,
+        allocatedQuote: 999_999,
+        allocatedBase: 2,
+      });
+
+      const experiments = [
+        (await repo.getExperiment(exp1))!,
+        ...(await repo.getExperimentsByStatus("paused")),
+      ];
+      const result = await wallet.reconcileAllocations(experiments);
+
+      expect(result.reconciled).toBe(true);
+      expect(result.quoteDiff).toBe(-50_000);
+      expect(result.baseDiff).toBeCloseTo(-0.01);
+
+      const state = await wallet.getState();
+      expect(state.totalAllocatedQuote).toBe(150_000);
+      expect(state.totalAllocatedBase).toBeCloseTo(0.01);
+      expect(state.availableQuote).toBe(150_000);
+      expect(state.availableBase).toBeCloseTo(0.04);
+    });
+
+    it("is a no-op when allocations are already consistent", async () => {
+      repo.setWallet({
+        totalAllocatedQuote: 100_000,
+        totalAllocatedBase: 0,
+        availableQuote: 200_000,
+        availableBase: 0.05,
+      });
+
+      const exp = await repo.createExperiment({
+        status: "active",
+        gridConfig,
+        allocatedQuote: 100_000,
+        allocatedBase: 0,
+      });
+
+      const result = await wallet.reconcileAllocations([(await repo.getExperiment(exp))!]);
+
+      expect(result.reconciled).toBe(false);
+      expect(result.quoteDiff).toBe(0);
+      expect(result.baseDiff).toBe(0);
     });
   });
 

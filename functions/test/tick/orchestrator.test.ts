@@ -16,6 +16,31 @@ const gridConfig: GridConfig = {
   budgetQuote: 100_000,
 };
 
+const ONE_MIN = 60 * 1000;
+
+function makeOscillatingTransactions(
+  center: number,
+  amplitude: number,
+  count: number,
+): Array<{
+  timestamp: number;
+  transactionId: number;
+  price: number;
+  amount: number;
+  currencyPair: string;
+  tradeType: "BUY" | "SELL";
+}> {
+  const baseTime = Date.now() - count * ONE_MIN;
+  return Array.from({ length: count }, (_, i) => ({
+    timestamp: baseTime + i * ONE_MIN,
+    transactionId: i + 1,
+    price: center + amplitude * Math.sin((2 * Math.PI * i) / 40),
+    amount: 0.001,
+    currencyPair: "BTC_CZK",
+    tradeType: (i % 2 === 0 ? "BUY" : "SELL") as "BUY" | "SELL",
+  }));
+}
+
 /** Create an active experiment in the repo and return its id + object */
 async function seedExperiment(
   repo: InMemoryRepository,
@@ -552,6 +577,164 @@ describe("GridTickOrchestrator", () => {
       expect(expResult.warnings.some((w) => w.includes("Insufficient balance"))).toBe(true);
     });
 
+    it("stops an active experiment after repeated insufficient-balance failures when funds are reserved elsewhere", async () => {
+      const blockedGridConfig: GridConfig = {
+        pair: "BTC_CZK",
+        lowerPrice: 1_300_000,
+        upperPrice: 1_580_000,
+        levels: 3,
+        budgetQuote: 5_000,
+      };
+      const { id } = await seedExperiment(repo, {
+        gridConfig: blockedGridConfig,
+        allocatedQuote: 5_000,
+      });
+      const pausedId = await repo.createExperiment({
+        status: "paused",
+        gridConfig: blockedGridConfig,
+        allocatedQuote: 0,
+        allocatedBase: 0,
+        consecutiveFailures: 0,
+      });
+      await repo.createOrder(pausedId, {
+        coinmateOrderId: "3816395949",
+        side: "buy",
+        price: 1_389_254.54,
+        amount: 0.00179952,
+        status: "open",
+        gridLevel: 0,
+        createdAt: new Date(),
+      });
+      repo.setWallet({
+        totalAllocatedQuote: 5_000,
+        totalAllocatedBase: 0,
+        availableQuote: 0,
+        availableBase: 0,
+      });
+
+      const client = createMockClient({
+        getTicker: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            last: 1_450_000,
+            high: 1_470_000,
+            low: 1_430_000,
+            amount: 10,
+            bid: 1_449_000,
+            ask: 1_451_000,
+            change: 0,
+            open: 1_450_000,
+            timestamp: Date.now(),
+          },
+        }),
+        buyLimit: vi.fn().mockRejectedValue(
+          new CoinmateApiError("Not enough account balance available", 400),
+        ),
+        getBalances: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            CZK: { currency: "CZK", balance: 5_000, reserved: 0, available: 0 },
+            BTC: { currency: "BTC", balance: 0, reserved: 0, available: 0 },
+          },
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      await orchestrator.executeTick();
+      let exp = await repo.getExperiment(id);
+      expect(exp!.status).toBe("active");
+      expect(exp!.consecutiveFailures).toBe(1);
+
+      const result = await orchestrator.executeTick();
+      exp = await repo.getExperiment(id);
+      expect(exp!.status).toBe("paused");
+      expect(
+        result.experimentResults
+          .find((r) => r.experimentId === id)!
+          .warnings.some((w) => w.includes("reserved funds")),
+      ).toBe(true);
+    });
+
+    it("does not stop active experiment on first insufficient-balance failure", async () => {
+      const blockedGridConfig: GridConfig = {
+        pair: "BTC_CZK",
+        lowerPrice: 1_300_000,
+        upperPrice: 1_580_000,
+        levels: 3,
+        budgetQuote: 5_000,
+      };
+      const { id } = await seedExperiment(repo, {
+        gridConfig: blockedGridConfig,
+        allocatedQuote: 5_000,
+      });
+      const pausedId = await repo.createExperiment({
+        status: "paused",
+        gridConfig: blockedGridConfig,
+        allocatedQuote: 0,
+        allocatedBase: 0,
+        consecutiveFailures: 0,
+      });
+      await repo.createOrder(pausedId, {
+        coinmateOrderId: "3816395949",
+        side: "buy",
+        price: 1_389_254.54,
+        amount: 0.00179952,
+        status: "open",
+        gridLevel: 0,
+        createdAt: new Date(),
+      });
+      repo.setWallet({
+        totalAllocatedQuote: 5_000,
+        totalAllocatedBase: 0,
+        availableQuote: 0,
+        availableBase: 0,
+      });
+
+      const client = createMockClient({
+        getTicker: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            last: 1_450_000,
+            high: 1_470_000,
+            low: 1_430_000,
+            amount: 10,
+            bid: 1_449_000,
+            ask: 1_451_000,
+            change: 0,
+            open: 1_450_000,
+            timestamp: Date.now(),
+          },
+        }),
+        buyLimit: vi.fn().mockRejectedValue(
+          new CoinmateApiError("Not enough account balance available", 400),
+        ),
+        getBalances: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            CZK: { currency: "CZK", balance: 5_000, reserved: 0, available: 0 },
+            BTC: { currency: "BTC", balance: 0, reserved: 0, available: 0 },
+          },
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      await orchestrator.executeTick();
+
+      const exp = await repo.getExperiment(id);
+      expect(exp!.status).toBe("active");
+      expect(exp!.consecutiveFailures).toBe(1);
+    });
+
     it("handles non-CoinmateApiError gracefully", async () => {
       const { id } = await seedExperiment(repo);
 
@@ -1065,9 +1248,9 @@ describe("GridTickOrchestrator", () => {
       await orchestrator.executeTick();
 
       const walletState = await walletManager.getState();
-      // available = actual (10k) - allocated (5k) = 5k
-      expect(walletState.availableQuote).toBe(5_000);
-      expect(walletState.totalAllocatedQuote).toBe(5_000);
+      // No experiments exist, so reconciliation should clear the stale allocation
+      expect(walletState.availableQuote).toBe(10_000);
+      expect(walletState.totalAllocatedQuote).toBe(0);
     });
 
     it("does not call getBalances when walletManager is not provided", async () => {
@@ -1197,9 +1380,182 @@ describe("GridTickOrchestrator", () => {
         }),
       );
 
-      // Wallet updated to reflect reality
+      // Wallet updated to reflect reality and stale allocation is cleared
       const walletState = await walletManager.getState();
-      expect(walletState.availableQuote).toBe(5_000); // 10k actual - 5k allocated
+      expect(walletState.availableQuote).toBe(10_000);
+    });
+
+    it("reconciles drifted wallet allocations from experiments", async () => {
+      await seedExperiment(repo, { allocatedQuote: 100_000 });
+      repo.setWallet({
+        totalAllocatedQuote: 200_000,
+        totalAllocatedBase: 0,
+        availableQuote: 100_000,
+        availableBase: 0,
+      });
+
+      const logger: Logger = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(createMockClient(), repo, logger, {
+        walletManager,
+        autopilotConfig: false,
+      });
+
+      await orchestrator.executeTick();
+
+      const walletState = await walletManager.getState();
+      expect(walletState.totalAllocatedQuote).toBe(100_000);
+      expect(walletState.availableQuote).toBe(50_000);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Wallet allocations reconciled",
+        expect.objectContaining({ quoteDiff: -100_000 }),
+      );
+    });
+  });
+
+  describe("autonomous supervision", () => {
+    it("recycles a stale entry experiment that is far off-market", async () => {
+      repo.setWallet({
+        totalAllocatedQuote: 100_000,
+        totalAllocatedBase: 0,
+        availableQuote: 50_000,
+        availableBase: 0,
+      });
+      await repo.updateAutopilotState({ enabled: false });
+
+      const id = await repo.createExperiment({
+        status: "active",
+        gridConfig,
+        allocatedQuote: 100_000,
+        allocatedBase: 0,
+      });
+      await repo.createOrder(id, {
+        coinmateOrderId: "9001",
+        side: "buy",
+        price: 2_000_000,
+        amount: 0.001,
+        status: "open",
+        gridLevel: 0,
+        createdAt: new Date(Date.now() - 120 * ONE_MIN),
+      });
+
+      const client = createMockClient({
+        getTicker: vi.fn().mockResolvedValue({
+          error: false,
+          data: { last: 2_200_000 },
+        }),
+        getOpenOrders: vi.fn().mockResolvedValue({
+          error: false,
+          data: [
+            { id: 9001, timestamp: Date.now(), type: "BUY", currencyPair: "BTC_CZK", price: 2_000_000, amount: 0.001 },
+          ],
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: { stalledEntryMinutes: 60 },
+      });
+
+      await orchestrator.executeTick();
+
+      const exp = await repo.getExperiment(id);
+      expect(exp!.status).toBe("paused");
+      expect(exp!.allocatedQuote).toBe(0);
+    });
+
+    it("waits for quiet period before deposit-driven replacement", async () => {
+      repo.setWallet({
+        totalAllocatedQuote: 100_000,
+        totalAllocatedBase: 0,
+        availableQuote: 50_000,
+        availableBase: 0,
+      });
+      await repo.updateAutopilotState({ enabled: false });
+
+      const { id } = await seedExperiment(repo);
+      await repo.createOrder(id, {
+        coinmateOrderId: "7001",
+        side: "buy",
+        price: 2_050_000,
+        amount: 0.001,
+        status: "filled",
+        gridLevel: 0,
+        createdAt: new Date(Date.now() - 30 * ONE_MIN),
+        filledAt: new Date(Date.now() - 30 * ONE_MIN),
+      });
+
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: makeOscillatingTransactions(2_200_000, 120_000, 500),
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: {
+          capitalIncreaseThresholdPercent: 20,
+          recentFillQuietPeriodMinutes: 90,
+        },
+      });
+
+      await orchestrator.executeTick();
+
+      const exp = await repo.getExperiment(id);
+      expect(exp!.status).toBe("active");
+    });
+
+    it("approves deposit-driven replacement after quiet period", async () => {
+      repo.setWallet({
+        totalAllocatedQuote: 100_000,
+        totalAllocatedBase: 0,
+        availableQuote: 50_000,
+        availableBase: 0,
+      });
+      await repo.updateAutopilotState({ enabled: false });
+
+      const { id } = await seedExperiment(repo);
+      await repo.createOrder(id, {
+        coinmateOrderId: "7002",
+        side: "buy",
+        price: 2_050_000,
+        amount: 0.001,
+        status: "filled",
+        gridLevel: 0,
+        createdAt: new Date(Date.now() - 4 * 60 * ONE_MIN),
+        filledAt: new Date(Date.now() - 4 * 60 * ONE_MIN),
+      });
+
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: makeOscillatingTransactions(2_200_000, 120_000, 500),
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: {
+          capitalIncreaseThresholdPercent: 20,
+          recentFillQuietPeriodMinutes: 90,
+          regridCooldownMinutes: 1,
+        },
+      });
+
+      await orchestrator.executeTick();
+
+      const exp = await repo.getExperiment(id);
+      expect(exp!.status).toBe("paused");
+      const state = await repo.getAutopilotState();
+      expect(state!.lastSupervisorDecision).toBe("replacement_approved");
     });
   });
 
@@ -1427,9 +1783,9 @@ describe("GridTickOrchestrator", () => {
       const result = await orchestrator.executeTick();
       const expResult = result.experimentResults.find((r) => r.experimentId === id)!;
 
-      // Emergency stop still completes (experiment paused)
+      // Emergency stop remains pending so wallet release is retried next tick
       const exp = await repo.getExperiment(id);
-      expect(exp!.status).toBe("paused");
+      expect(exp!.status).toBe("stopped");
 
       // Warning should be added about wallet release failure
       expect(expResult.warnings.some((w) => w.includes("Wallet release error"))).toBe(true);
@@ -1438,9 +1794,9 @@ describe("GridTickOrchestrator", () => {
       const walletAlert = alerts.find((a) => a.type === "wallet_release_failed");
       expect(walletAlert).toBeDefined();
 
-      // Emergency stop completed alert still emitted
+      // Emergency stop completed alert should not fire until wallet release succeeds
       const stopAlert = alerts.find((a) => a.type === "emergency_stop_completed");
-      expect(stopAlert).toBeDefined();
+      expect(stopAlert).toBeUndefined();
     });
   });
 });

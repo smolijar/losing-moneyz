@@ -1,8 +1,9 @@
-import type { Experiment, ExperimentSnapshot, AutopilotConfig } from "../config";
-import { COINMATE_FEES, PAIR_LIMITS } from "../config";
+import type { Experiment, ExperimentSnapshot, AutopilotConfig, OrderRecord } from "../config";
+import { AUTOPILOT_DEFAULTS, COINMATE_FEES, PAIR_LIMITS } from "../config";
 import { CoinmateApiError, type ExchangeClient } from "../coinmate";
 import {
   calculateGridLevels,
+  getGridSpacing,
   reconcileOrders,
   matchOrdersToGrid,
   computePnL,
@@ -14,6 +15,8 @@ import {
 import type { Repository } from "../storage";
 import type { WalletManager } from "../storage";
 import { Autopilot, type AutopilotResult } from "../autopilot";
+import { suggestParams } from "../autopilot/param-suggester";
+import { validateWithBacktest, type PriceTick } from "../backtest";
 import {
   runAllSafeguards,
   type SafeguardConfig,
@@ -127,6 +130,7 @@ export class GridTickOrchestrator {
   private readonly safeguardConfig: SafeguardConfig;
   private readonly walletManager: WalletManager | undefined;
   private readonly autopilot: Autopilot | undefined;
+  private readonly autopilotConfig: AutopilotConfig | undefined;
 
   constructor(
     private readonly client: ExchangeClient,
@@ -137,15 +141,19 @@ export class GridTickOrchestrator {
     this.safeguardConfig = options?.safeguardConfig ?? DEFAULT_SAFEGUARD_CONFIG;
     this.alertSink = options?.alertSink ?? nullAlertSink;
     this.walletManager = options?.walletManager;
+    this.autopilotConfig =
+      options?.autopilotConfig === false
+        ? undefined
+        : { ...AUTOPILOT_DEFAULTS, ...(options?.autopilotConfig ?? {}) };
 
     // Initialize autopilot if wallet manager is available and not explicitly disabled
-    if (this.walletManager && options?.autopilotConfig !== false) {
+    if (this.walletManager && this.autopilotConfig) {
       this.autopilot = new Autopilot(
         client,
         repo,
         this.walletManager,
         logger,
-        options?.autopilotConfig || undefined,
+        this.autopilotConfig,
       );
     }
   }
@@ -192,26 +200,46 @@ export class GridTickOrchestrator {
       }
     }
 
-    const experiments = await this.repo.getExperimentsByStatus("active");
+    let experiments = await this.repo.getExperimentsByStatus("active");
+    const pausedExperiments = await this.repo.getExperimentsByStatus("paused");
+    const stoppedExperiments = await this.repo.getExperimentsByStatus("stopped");
+    if (this.walletManager) {
+      const reconciliation = await this.walletManager.reconcileAllocations([
+        ...experiments,
+        ...pausedExperiments,
+        ...stoppedExperiments.filter((experiment) =>
+          experiment.allocatedQuote > 0 || experiment.allocatedBase > 0,
+        ),
+      ]);
+      if (reconciliation.reconciled) {
+        this.logger.warn("Wallet allocations reconciled", {
+          quoteDiff: reconciliation.quoteDiff,
+          baseDiff: reconciliation.baseDiff,
+          walletState: reconciliation.walletState,
+        });
+      }
+    }
+    experiments = await this.repo.getExperimentsByStatus("active");
     this.logger.info(`Found ${experiments.length} active experiments`);
 
     const results: TickResult[] = [];
     let autopilotResult: AutopilotResult | undefined;
 
     for (const experiment of experiments) {
-      const result = await this.processExperiment(experiment, timestamp);
+      const result = await this.processExperiment(experiment, timestamp, experiments.length === 1);
       results.push(result);
     }
 
     // Also check for "stopped" experiments that need cleanup
-    const stoppedExperiments = await this.repo.getExperimentsByStatus("stopped");
-    for (const experiment of stoppedExperiments) {
+    const stoppedExperimentsToCleanup = await this.repo.getExperimentsByStatus("stopped");
+    for (const experiment of stoppedExperimentsToCleanup) {
       const result = await this.handleEmergencyStop(experiment);
       results.push(result);
     }
 
     // Autopilot: when no active experiments, try to self-regulate
-    if (experiments.length === 0 && this.autopilot) {
+    const activeAfterProcessing = await this.repo.getExperimentsByStatus("active");
+    if (activeAfterProcessing.length === 0 && this.autopilot) {
       try {
         autopilotResult = await this.autopilot.engage();
         this.logger.info("Autopilot result", {
@@ -241,6 +269,7 @@ export class GridTickOrchestrator {
   private async processExperiment(
     experiment: Experiment,
     timestamp: Date,
+    isSoleActiveExperiment: boolean,
   ): Promise<TickResult> {
     const result: TickResult = {
       experimentId: experiment.id,
@@ -252,6 +281,7 @@ export class GridTickOrchestrator {
     };
 
     try {
+      let blockedFailureIncremented = false;
       // 1. Get current price
       const ticker = await this.client.getTicker(experiment.gridConfig.pair);
       const currentPrice = ticker.data.last;
@@ -396,6 +426,22 @@ export class GridTickOrchestrator {
 
       result.fillsDetected = fills.length;
 
+      const allFillEvents = [...historicalFillEvents, ...fills];
+      const supervisorDecision = await this.evaluateAutonomousExperimentAction(
+        experiment,
+        currentPrice,
+        previousOrders,
+        historicalFilled,
+        allFillEvents,
+        timestamp,
+        isSoleActiveExperiment,
+      );
+      if (supervisorDecision.stop) {
+        result.status = "skipped";
+        result.warnings.push(supervisorDecision.reason);
+        return result;
+      }
+
       // 7. Run grid reconciliation with ReconcileOptions
       const budgetPerLevel = getBudgetPerLevel(experiment.gridConfig);
       const pair = experiment.gridConfig.pair;
@@ -404,7 +450,6 @@ export class GridTickOrchestrator {
       // #12: Compute available quote budget for buy orders.
       // Start from allocated quote, subtract buy fills, add sell fills (minus fees),
       // then subtract what's already committed in existing open buy orders.
-      const allFillEvents = [...historicalFillEvents, ...fills];
       let availableQuote = experiment.allocatedQuote;
       for (const fill of allFillEvents) {
         const value = fill.price * fill.amount;
@@ -494,6 +539,19 @@ export class GridTickOrchestrator {
             timestamp: new Date(),
           });
           result.warnings.push(`Order action failed: ${errMsg}`);
+
+          const blockedRecovery = await this.handleBlockedActiveExperiment(
+            experiment,
+            action,
+            errMsg,
+          );
+          blockedFailureIncremented =
+            blockedFailureIncremented || blockedRecovery.incrementedFailure;
+          if (blockedRecovery.stopped) {
+            result.status = "skipped";
+            result.warnings.push(blockedRecovery.reason);
+            return result;
+          }
         }
       }
 
@@ -532,7 +590,7 @@ export class GridTickOrchestrator {
       await this.repo.saveSnapshot(experiment.id, snapshot);
 
       // Reset consecutive failures on success
-      if (experiment.consecutiveFailures > 0) {
+      if (experiment.consecutiveFailures > 0 && !blockedFailureIncremented) {
         await this.repo.updateExperiment(experiment.id, { consecutiveFailures: 0 });
       }
 
@@ -736,9 +794,9 @@ export class GridTickOrchestrator {
       // Only transition to paused if ALL orders were successfully cancelled
       const remainingOpen = await this.repo.getOrdersByStatus(experiment.id, "open");
       if (remainingOpen.length === 0) {
-        await this.repo.updateExperimentStatus(experiment.id, "paused");
+        let walletReleased = true;
 
-        // Release wallet allocation back to the pool
+        // Release wallet allocation back to the pool before moving to paused
         if (this.walletManager) {
           try {
             const walletResult = await this.walletManager.releaseForExperiment(experiment.id);
@@ -756,6 +814,7 @@ export class GridTickOrchestrator {
                 timestamp: new Date(),
               });
             } else {
+              walletReleased = false;
               this.logger.warn("Wallet release returned failure", {
                 experimentId: experiment.id,
                 reason: walletResult.reason,
@@ -771,6 +830,7 @@ export class GridTickOrchestrator {
               result.warnings.push(`Wallet release failed: ${walletResult.reason}`);
             }
           } catch (walletErr) {
+            walletReleased = false;
             const walletErrMsg = walletErr instanceof Error ? walletErr.message : String(walletErr);
             this.logger.error("Wallet release threw error", {
               experimentId: experiment.id,
@@ -787,6 +847,16 @@ export class GridTickOrchestrator {
             result.warnings.push(`Wallet release error: ${walletErrMsg}`);
           }
         }
+
+        if (!walletReleased) {
+          this.logger.warn("Emergency stop awaiting wallet release retry", {
+            experimentId: experiment.id,
+          });
+          result.status = "skipped";
+          return result;
+        }
+
+        await this.repo.updateExperimentStatus(experiment.id, "paused");
 
         this.logger.info("Emergency stop completed", {
           experimentId: experiment.id,
@@ -827,5 +897,304 @@ export class GridTickOrchestrator {
     }
 
     return result;
+  }
+
+  private async evaluateAutonomousExperimentAction(
+    experiment: Experiment,
+    currentPrice: number,
+    openOrders: OrderRecord[],
+    historicalFilled: OrderRecord[],
+    allFillEvents: FillEvent[],
+    timestamp: Date,
+    isSoleActiveExperiment: boolean,
+  ): Promise<{ stop: boolean; reason: string }> {
+    if (!this.walletManager || !this.autopilotConfig) {
+      return { stop: false, reason: "" };
+    }
+
+    const stalledReason = this.getStalledExperimentReason(
+      experiment,
+      currentPrice,
+      openOrders,
+      historicalFilled,
+      timestamp,
+    );
+    if (stalledReason) {
+      await this.repo.updateExperimentStatus(experiment.id, "stopped");
+      await this.repo.updateAutopilotState({
+        lastReason: stalledReason,
+        lastSupervisorDecision: "stalled_recycle",
+        lastReplacementAt: timestamp,
+      });
+      this.logger.warn("Stalled experiment detected", {
+        experimentId: experiment.id,
+        currentPrice,
+        reason: stalledReason,
+      });
+      return { stop: true, reason: stalledReason };
+    }
+
+    if (!isSoleActiveExperiment) {
+      return { stop: false, reason: "" };
+    }
+
+    const wallet = await this.walletManager.getState();
+    const currentBudget = Math.max(experiment.gridConfig.budgetQuote, 1);
+    const totalCapital = wallet.availableQuote + wallet.totalAllocatedQuote;
+    const capitalIncreasePercent = ((totalCapital - currentBudget) / currentBudget) * 100;
+
+    if (capitalIncreasePercent < this.autopilotConfig.capitalIncreaseThresholdPercent) {
+      return { stop: false, reason: "" };
+    }
+
+    const lastFillAt = this.getLastFillTime(historicalFilled, allFillEvents);
+    const quietSinceMinutes = lastFillAt
+      ? (timestamp.getTime() - lastFillAt.getTime()) / 60000
+      : Number.POSITIVE_INFINITY;
+    if (quietSinceMinutes < this.autopilotConfig.recentFillQuietPeriodMinutes) {
+      await this.repo.updateAutopilotState({
+        lastSupervisorDecision: "replacement_blocked_quiet_period",
+        lastCapitalIncreasePercent: capitalIncreasePercent,
+      });
+      this.logger.info("Quiet period blocked autonomous replacement", {
+        experimentId: experiment.id,
+        quietSinceMinutes,
+        requiredMinutes: this.autopilotConfig.recentFillQuietPeriodMinutes,
+        capitalIncreasePercent,
+      });
+      return { stop: false, reason: "" };
+    }
+
+    const autopilotState = await this.repo.getAutopilotState();
+    if (autopilotState?.lastReplacementAt) {
+      const elapsedMinutes =
+        (timestamp.getTime() - autopilotState.lastReplacementAt.getTime()) / 60000;
+      if (elapsedMinutes < this.autopilotConfig.regridCooldownMinutes) {
+        await this.repo.updateAutopilotState({
+          lastSupervisorDecision: "replacement_blocked_cooldown",
+          lastCapitalIncreasePercent: capitalIncreasePercent,
+        });
+        return { stop: false, reason: "" };
+      }
+    }
+
+    const txResponse = await this.client.getTransactions(
+      experiment.gridConfig.pair,
+      this.autopilotConfig.minHistoryMinutes,
+    );
+    if (txResponse.error) {
+      this.logger.warn("Autonomous replacement skipped due to transaction fetch error", {
+        experimentId: experiment.id,
+        error: txResponse.errorMessage,
+      });
+      return { stop: false, reason: "" };
+    }
+
+    const ticks: PriceTick[] = txResponse.data.map((t) => ({
+      timestamp: t.timestamp,
+      price: t.price,
+      amount: t.amount,
+      side: t.tradeType === "BUY" ? "buy" : "sell",
+    }));
+    ticks.sort((a, b) => a.timestamp - b.timestamp);
+
+    const suggestion = suggestParams(ticks, totalCapital, this.autopilotConfig);
+    if (!suggestion || "skipped" in suggestion) {
+      await this.repo.updateAutopilotState({
+        lastSupervisorDecision:
+          suggestion && "reason" in suggestion
+            ? `replacement_skipped:${suggestion.reason}`
+            : "replacement_skipped:no_candidate",
+        lastCapitalIncreasePercent: capitalIncreasePercent,
+      });
+      return { stop: false, reason: "" };
+    }
+
+    const candidateValidation = validateWithBacktest(suggestion.config, ticks, {
+      minReturnPercent: this.autopilotConfig.backtestMinReturnPercent,
+      maxDrawdownPercent: this.autopilotConfig.backtestMaxDrawdownPercent,
+    });
+    if (!candidateValidation.approved) {
+      await this.repo.updateAutopilotState({
+        lastSupervisorDecision: `replacement_skipped:${candidateValidation.reasons.join("; ")}`,
+        lastCapitalIncreasePercent: capitalIncreasePercent,
+      });
+      return { stop: false, reason: "" };
+    }
+
+    const currentValidation = validateWithBacktest(experiment.gridConfig, ticks, {
+      minReturnPercent: this.autopilotConfig.backtestMinReturnPercent,
+      maxDrawdownPercent: this.autopilotConfig.backtestMaxDrawdownPercent,
+    });
+    const improvement =
+      candidateValidation.report.totalReturnPercent - currentValidation.report.totalReturnPercent;
+    const budgetIncreasePercent =
+      ((suggestion.config.budgetQuote - experiment.gridConfig.budgetQuote) /
+        Math.max(experiment.gridConfig.budgetQuote, 1)) *
+      100;
+
+    if (
+      improvement < this.autopilotConfig.replacementImprovementThreshold &&
+      budgetIncreasePercent < this.autopilotConfig.capitalIncreaseThresholdPercent
+    ) {
+      await this.repo.updateAutopilotState({
+        lastSupervisorDecision: "replacement_skipped:improvement_below_threshold",
+        lastCapitalIncreasePercent: capitalIncreasePercent,
+      });
+      return { stop: false, reason: "" };
+    }
+
+    const reason =
+      `Autonomous replacement approved after ${capitalIncreasePercent.toFixed(1)}% capital increase`;
+    await this.repo.updateExperimentStatus(experiment.id, "stopped");
+    await this.repo.updateAutopilotState({
+      lastReason: reason,
+      lastSupervisorDecision: "replacement_approved",
+      lastCapitalIncreasePercent: capitalIncreasePercent,
+      lastReplacementAt: timestamp,
+    });
+    this.logger.info("Autonomous grid replacement approved", {
+      experimentId: experiment.id,
+      capitalIncreasePercent,
+      currentReturnPercent: currentValidation.report.totalReturnPercent,
+      candidateReturnPercent: candidateValidation.report.totalReturnPercent,
+      candidateBudget: suggestion.config.budgetQuote,
+    });
+    return { stop: true, reason };
+  }
+
+  private getStalledExperimentReason(
+    experiment: Experiment,
+    currentPrice: number,
+    openOrders: OrderRecord[],
+    historicalFilled: OrderRecord[],
+    timestamp: Date,
+  ): string | undefined {
+    if (!this.autopilotConfig?.enableStallAutofix || openOrders.length === 0) {
+      return undefined;
+    }
+
+    const oldestOpenOrder = openOrders.reduce((oldest, order) =>
+      order.createdAt < oldest.createdAt ? order : oldest,
+    );
+    const nearestGapPercent = Math.min(
+      ...openOrders.map((order) => (Math.abs(order.price - currentPrice) / currentPrice) * 100),
+    );
+    const gridSpacing = getGridSpacing(experiment.gridConfig);
+    const nearestGapSpacings = Math.min(
+      ...openOrders.map((order) => Math.abs(order.price - currentPrice) / Math.max(gridSpacing, 1)),
+    );
+    const offMarketEnough =
+      nearestGapPercent >= this.autopilotConfig.stalledPriceGapPercent ||
+      nearestGapSpacings >= this.autopilotConfig.stalledGridSpacingMultiplier;
+    if (!offMarketEnough) {
+      return undefined;
+    }
+
+    const hasFilled = historicalFilled.length > 0;
+    const referenceTime = hasFilled
+      ? historicalFilled.reduce((latest, order) => {
+          const when = order.filledAt ?? order.createdAt;
+          return when > latest ? when : latest;
+        }, historicalFilled[0].filledAt ?? historicalFilled[0].createdAt)
+      : oldestOpenOrder.createdAt;
+    const idleMinutes = (timestamp.getTime() - referenceTime.getTime()) / 60000;
+    const threshold = hasFilled
+      ? this.autopilotConfig.stalledActiveMinutes
+      : this.autopilotConfig.stalledEntryMinutes;
+
+    if (idleMinutes < threshold) {
+      return undefined;
+    }
+
+    return hasFilled
+      ? `Active grid stale for ${idleMinutes.toFixed(0)} min with nearest order ${nearestGapPercent.toFixed(2)}% off-market`
+      : `Entry grid stale for ${idleMinutes.toFixed(0)} min with nearest order ${nearestGapPercent.toFixed(2)}% off-market`;
+  }
+
+  private getLastFillTime(historicalFilled: OrderRecord[], allFillEvents: FillEvent[]): Date | undefined {
+    const historicalTimes = historicalFilled.map((order) => order.filledAt ?? order.createdAt);
+    const liveTimes = allFillEvents.map((fill) => new Date(fill.timestamp));
+    const allTimes = [...historicalTimes, ...liveTimes];
+    if (allTimes.length === 0) return undefined;
+    return allTimes.reduce((latest, current) => (current > latest ? current : latest));
+  }
+
+  private async handleBlockedActiveExperiment(
+    experiment: Experiment,
+    action: OrderAction,
+    errMsg: string,
+  ): Promise<{ stopped: boolean; reason: string; incrementedFailure: boolean }> {
+    if (!this.walletManager || action.type !== "place") {
+      return { stopped: false, reason: "", incrementedFailure: false };
+    }
+
+    if (!errMsg.toLowerCase().includes("not enough account balance available")) {
+      return { stopped: false, reason: "", incrementedFailure: false };
+    }
+
+    const ownOpenOrders = await this.repo.getOrdersByStatus(experiment.id, "open");
+    if (ownOpenOrders.length > 0) {
+      return { stopped: false, reason: "", incrementedFailure: false };
+    }
+
+    const wallet = await this.walletManager.getState();
+    if (action.side === "buy" && wallet.availableQuote > 0.01) {
+      return { stopped: false, reason: "", incrementedFailure: false };
+    }
+    if (action.side === "sell" && wallet.availableBase > 0.00000001) {
+      return { stopped: false, reason: "", incrementedFailure: false };
+    }
+
+    const reservedElsewhere = await this.hasOtherExperimentsWithOpenOrders(experiment.id);
+    if (!reservedElsewhere) {
+      return { stopped: false, reason: "", incrementedFailure: false };
+    }
+
+    const blockedFailures = experiment.consecutiveFailures + 1;
+    if (blockedFailures < 2) {
+      await this.repo.updateExperiment(experiment.id, {
+        consecutiveFailures: blockedFailures,
+      });
+      this.logger.warn("Active experiment may be blocked by reserved funds", {
+        experimentId: experiment.id,
+        blockedFailures,
+        action,
+        error: errMsg,
+      });
+      return {
+        stopped: false,
+        reason: `Blocked by reserved funds suspicion ${blockedFailures}/2`,
+        incrementedFailure: true,
+      };
+    }
+
+    const reason = "Active experiment blocked by reserved funds in another experiment";
+    await this.repo.updateExperiment(experiment.id, {
+      consecutiveFailures: blockedFailures,
+    });
+    await this.repo.updateExperimentStatus(experiment.id, "stopped");
+    this.logger.warn("Active experiment blocked by reserved funds", {
+      experimentId: experiment.id,
+      blockedFailures,
+      action,
+      error: errMsg,
+    });
+    return { stopped: true, reason, incrementedFailure: true };
+  }
+
+  private async hasOtherExperimentsWithOpenOrders(currentExperimentId: string): Promise<boolean> {
+    const candidateStatuses: Array<"paused" | "stopped"> = ["paused", "stopped"];
+    for (const status of candidateStatuses) {
+      const experiments = await this.repo.getExperimentsByStatus(status);
+      for (const experiment of experiments) {
+        if (experiment.id === currentExperimentId) continue;
+        const openOrders = await this.repo.getOrdersByStatus(experiment.id, "open");
+        if (openOrders.length > 0) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 }

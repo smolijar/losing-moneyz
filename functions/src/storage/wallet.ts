@@ -1,4 +1,4 @@
-import type { GridConfig, WalletState } from "../config";
+import type { Experiment, GridConfig, WalletState } from "../config";
 import type { Repository } from "./repository";
 
 /** Result of a wallet operation */
@@ -62,16 +62,56 @@ export class WalletManager {
       return { success: false, reason: `Experiment ${experimentId} not found` };
     }
 
-    await this.repo.releaseWallet(experiment.allocatedQuote, experiment.allocatedBase);
-
-    // Zero out experiment allocation
-    await this.repo.updateExperiment(experimentId, {
-      allocatedQuote: 0,
-      allocatedBase: 0,
-    });
+    await this.repo.releaseExperimentAllocation(experimentId);
 
     const wallet = await this.repo.getWalletState();
     return { success: true, walletState: wallet };
+  }
+
+  /**
+   * Recompute allocated totals from active + paused experiments and repair the
+   * stored wallet state if bookkeeping drift is detected.
+   */
+  async reconcileAllocations(experiments: Experiment[]): Promise<{
+    reconciled: boolean;
+    quoteDiff: number;
+    baseDiff: number;
+    walletState: WalletState;
+  }> {
+    const expectedAllocatedQuote = experiments.reduce((sum, exp) => sum + exp.allocatedQuote, 0);
+    const expectedAllocatedBase = experiments.reduce((sum, exp) => sum + exp.allocatedBase, 0);
+    const wallet = await this.repo.getWalletState();
+
+    const quoteDiff = expectedAllocatedQuote - wallet.totalAllocatedQuote;
+    const baseDiff = expectedAllocatedBase - wallet.totalAllocatedBase;
+    const shouldReconcile = Math.abs(quoteDiff) > 0.01 || Math.abs(baseDiff) > 0.00000001;
+
+    if (!shouldReconcile) {
+      return {
+        reconciled: false,
+        quoteDiff,
+        baseDiff,
+        walletState: wallet,
+      };
+    }
+
+    const totalQuote = wallet.availableQuote + wallet.totalAllocatedQuote;
+    const totalBase = wallet.availableBase + wallet.totalAllocatedBase;
+    const nextWallet: WalletState = {
+      totalAllocatedQuote: expectedAllocatedQuote,
+      totalAllocatedBase: expectedAllocatedBase,
+      availableQuote: totalQuote - expectedAllocatedQuote,
+      availableBase: totalBase - expectedAllocatedBase,
+    };
+
+    await this.repo.updateWalletState(nextWallet);
+
+    return {
+      reconciled: true,
+      quoteDiff,
+      baseDiff,
+      walletState: await this.repo.getWalletState(),
+    };
   }
 
   /**
