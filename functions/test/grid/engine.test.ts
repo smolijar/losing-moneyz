@@ -798,8 +798,9 @@ describe("reconcileOrders availableQuote constraint", () => {
     });
     const conBuys = constrained.filter((a) => a.type === "place" && a.side === "buy");
 
-    // Should only place 1 buy (the first one), skip the rest
+    // Should only place 1 buy, prioritizing the nearest level below market.
     expect(conBuys.length).toBe(1);
+    expect(conBuys[0].type === "place" ? conBuys[0].price : 0).toBe(2_040_000);
   });
 
   it("places no buys when availableQuote is 0", () => {
@@ -849,6 +850,26 @@ describe("reconcileOrders availableQuote constraint", () => {
     });
     const conBuys = constrained.filter((a) => a.type === "place" && a.side === "buy");
     expect(conBuys.length).toBe(2);
+    expect(conBuys[0].type === "place" ? conBuys[0].price : 0).toBe(2_040_000);
+  });
+
+  it("prioritizes nearest buy levels below market when quote is constrained", () => {
+    const feeRate = 0.004;
+    const unconstrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
+      feeRate,
+    });
+    const uncBuys = unconstrained.filter((a) => a.type === "place" && a.side === "buy");
+    const firstBuyCost =
+      uncBuys[0].type === "place" ? uncBuys[0].amount * uncBuys[0].price * (1 + feeRate) : 0;
+    const constrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
+      feeRate,
+      availableQuote: firstBuyCost,
+    });
+    const conBuys = constrained.filter((a) => a.type === "place" && a.side === "buy");
+
+    expect(conBuys.length).toBe(1);
+    expect(conBuys[0].type === "place" ? conBuys[0].gridLevel : -1).toBe(2);
+    expect(conBuys[0].type === "place" ? conBuys[0].price : 0).toBe(2_040_000);
   });
 });
 

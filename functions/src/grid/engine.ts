@@ -200,62 +200,53 @@ export function reconcileOrders(
   // Track available quote for buy placement (if provided)
   let remainingQuote = options.availableQuote;
 
-  // Compute desired state and diff against actual
-  for (const level of gridLevels) {
-    if (ordersByLevel.has(level.index)) {
-      // Level already has an order — no action needed
-      continue;
+  const buyLevels = gridLevels
+    .filter((level) => level.price < currentPrice && !ordersByLevel.has(level.index))
+    .sort((a, b) => b.price - a.price);
+  for (const level of buyLevels) {
+    const rawAmount = budgetPerLevel / level.price;
+    const amount = roundAmount(rawAmount, pair);
+    if (amount <= 0) continue;
+
+    const orderCost = amount * level.price * (1 + feeRate);
+    if (remainingQuote !== undefined) {
+      if (remainingQuote < orderCost) {
+        continue;
+      }
+      remainingQuote -= orderCost;
     }
 
-    if (level.price < currentPrice) {
-      // Desired: BUY order at this level
-      const rawAmount = budgetPerLevel / level.price;
-      const amount = roundAmount(rawAmount, pair);
-      if (amount <= 0) continue;
+    actions.push({
+      type: "place",
+      side: "buy",
+      price: level.price,
+      amount,
+      gridLevel: level.index,
+    });
+  }
 
-      // Enforce available quote constraint (include fee — the exchange locks
-      // price * amount * (1 + feeRate) when placing a limit buy)
-      const orderCost = amount * level.price * (1 + feeRate);
-      if (remainingQuote !== undefined) {
-        if (remainingQuote < orderCost) {
-          // Not enough quote to place this buy — skip
-          continue;
-        }
-        remainingQuote -= orderCost;
+  const sellLevels = gridLevels
+    .filter((level) => level.price > currentPrice && !ordersByLevel.has(level.index))
+    .sort((a, b) => a.price - b.price);
+  for (const level of sellLevels) {
+    const rawAmount = (budgetPerLevel / level.price) * (1 - feeRate);
+    const amount = roundAmount(rawAmount, pair);
+    if (amount <= 0) continue;
+
+    if (remainingBase !== undefined) {
+      if (remainingBase < amount) {
+        continue;
       }
-
-      actions.push({
-        type: "place",
-        side: "buy",
-        price: level.price,
-        amount,
-        gridLevel: level.index,
-      });
-    } else if (level.price > currentPrice) {
-      // Desired: SELL order at this level
-      // Fee-adjusted amount: we received (1 - feeRate) of the base from the buy fill
-      const rawAmount = (budgetPerLevel / level.price) * (1 - feeRate);
-      const amount = roundAmount(rawAmount, pair);
-      if (amount <= 0) continue;
-
-      // Enforce available base constraint
-      if (remainingBase !== undefined) {
-        if (remainingBase < amount) {
-          // Not enough base to place this sell — skip
-          continue;
-        }
-        remainingBase -= amount;
-      }
-
-      actions.push({
-        type: "place",
-        side: "sell",
-        price: level.price,
-        amount,
-        gridLevel: level.index,
-      });
+      remainingBase -= amount;
     }
-    // level.price === currentPrice → skip (right on the line)
+
+    actions.push({
+      type: "place",
+      side: "sell",
+      price: level.price,
+      amount,
+      gridLevel: level.index,
+    });
   }
 
   return actions;
