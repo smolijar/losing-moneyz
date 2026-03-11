@@ -483,7 +483,7 @@ export class GridTickOrchestrator {
         }
       }
 
-      const actions = reconcileOrders(
+      let actions = reconcileOrders(
         gridLevels,
         matchedOrders,
         fills,
@@ -495,6 +495,14 @@ export class GridTickOrchestrator {
           availableBase,
           availableQuote,
         },
+      );
+
+      actions = this.limitBootstrapEntryActions(
+        experiment,
+        actions,
+        previousOrders,
+        historicalFilled,
+        fills,
       );
 
       // 7b. Warn if budget is too low to meet minimum order size
@@ -1196,5 +1204,45 @@ export class GridTickOrchestrator {
       }
     }
     return false;
+  }
+
+  private limitBootstrapEntryActions(
+    experiment: Experiment,
+    actions: OrderAction[],
+    previousOrders: OrderRecord[],
+    historicalFilled: OrderRecord[],
+    fills: FillEvent[],
+  ): OrderAction[] {
+    const isFreshEntry =
+      experiment.allocatedBase <= 0 &&
+      previousOrders.length === 0 &&
+      historicalFilled.length === 0 &&
+      fills.length === 0;
+
+    if (!isFreshEntry) {
+      return actions;
+    }
+
+    const buyPlaces: Array<Extract<OrderAction, { type: "place" }>> = [];
+    for (const action of actions) {
+      if (action.type === "place" && action.side === "buy") {
+        buyPlaces.push(action);
+      }
+    }
+    buyPlaces.sort((a, b) => b.price - a.price);
+
+    if (buyPlaces.length <= 1) {
+      return actions.filter((action) => action.type !== "place" || action.side !== "sell");
+    }
+
+    const nearestBuy = buyPlaces[0];
+    return actions.filter(
+      (action) =>
+        action.type === "cancel" ||
+        (action.type === "place" &&
+          action.side === "buy" &&
+          action.gridLevel === nearestBuy.gridLevel &&
+          action.price === nearestBuy.price),
+    );
   }
 }

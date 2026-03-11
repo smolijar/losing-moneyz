@@ -5,6 +5,7 @@ import {
   computeDailyVolatility,
   suggestParams,
 } from "../../src/autopilot";
+import { calculateGridLevels } from "../../src/grid";
 import type { PriceTick } from "../../src/backtest";
 import { AUTOPILOT_DEFAULTS, type AutopilotConfig } from "../../src/config";
 
@@ -318,6 +319,26 @@ describe("suggestParams", () => {
       expect(result.config.levels).toBeGreaterThanOrEqual(3);
       expect(result.metrics.adjustments.some((a: string) => a.includes("Levels clamped to minimum 3"))).toBe(true);
     }
+  });
+
+  it("biases the nearest bootstrap buy toward market for sparse grids", () => {
+    const ticks = makeOscillatingTicks(1_450_000, 1_550_000, 500);
+    const sparseConfig: AutopilotConfig = {
+      ...AUTOPILOT_DEFAULTS,
+      rangeMultiplier: 2.0,
+      spacingMultiplier: 5.0,
+    };
+    const result = suggestParams(ticks, 5_000, sparseConfig);
+
+    const suggested = expectSuggested(result);
+    const currentPrice = suggested.metrics.currentPrice;
+    const nearestBelow = calculateGridLevels(suggested.config)
+      .filter((level) => level.price < currentPrice)
+      .sort((a, b) => b.price - a.price)[0];
+
+    expect(nearestBelow).toBeDefined();
+    const gapPercent = ((currentPrice - nearestBelow.price) / currentPrice) * 100;
+    expect(gapPercent).toBeLessThanOrEqual(3.1);
   });
 
   it("returns null if budget too low to meet minimum order size", () => {

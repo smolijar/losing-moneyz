@@ -170,7 +170,7 @@ describe("GridTickOrchestrator", () => {
   // ─── Initial grid setup ────────────────────────────────────────────
 
   describe("initial grid placement", () => {
-    it("places initial buy and sell orders on first tick", async () => {
+    it("places only the nearest bootstrap buy on first tick", async () => {
       const { id } = await seedExperiment(repo);
 
       const client = createMockClient();
@@ -179,13 +179,10 @@ describe("GridTickOrchestrator", () => {
       const result = await orchestrator.executeTick();
       const expResult = result.experimentResults.find((r) => r.experimentId === id)!;
 
-      // With price at 2.2M, grid levels at 2.0M, 2.1M, 2.2M, 2.3M, 2.4M
-      // buy orders: 2.0M, 2.1M (below 2.2M)
-      // sell orders: NONE — no base inventory on first tick (allocatedBase=0, no fills)
-      // #12: Budget enforcement + #4: availableBase constraint
+      // Fresh entry bootstrap only places the nearest buy below market.
       expect(expResult.status).toBe("ok");
-      expect(expResult.ordersPlaced).toBe(2);
-      expect(client.buyLimit).toHaveBeenCalledTimes(2);
+      expect(expResult.ordersPlaced).toBe(1);
+      expect(client.buyLimit).toHaveBeenCalledTimes(1);
       expect(client.sellLimit).toHaveBeenCalledTimes(0);
     });
 
@@ -198,13 +195,14 @@ describe("GridTickOrchestrator", () => {
       await orchestrator.executeTick();
 
       const orders = await repo.getOrdersByStatus(id, "open");
-      // Only buy orders placed (no base inventory for sells)
-      expect(orders.length).toBe(2);
+      // Only the nearest bootstrap buy is placed
+      expect(orders.length).toBe(1);
 
       const buys = orders.filter((o) => o.side === "buy");
       const sells = orders.filter((o) => o.side === "sell");
-      expect(buys.length).toBe(2);
+      expect(buys.length).toBe(1);
       expect(sells.length).toBe(0);
+      expect(buys[0].price).toBe(2_100_000);
     });
 
     it("saves a snapshot after processing", async () => {
@@ -572,8 +570,8 @@ describe("GridTickOrchestrator", () => {
       const expResult = result.experimentResults.find((r) => r.experimentId === id)!;
       // Status should still be ok (individual order failure is not fatal)
       expect(expResult.status).toBe("ok");
-      // Two buys attempted (no sells — no base), one buy failed → 1 placed
-      expect(expResult.ordersPlaced).toBe(1);
+      // Bootstrap only attempts one buy, so a failure leaves zero placed
+      expect(expResult.ordersPlaced).toBe(0);
       expect(expResult.warnings.some((w) => w.includes("Insufficient balance"))).toBe(true);
     });
 
@@ -1123,7 +1121,7 @@ describe("GridTickOrchestrator", () => {
       // (no sells: allocatedBase=0, no fills yet → availableBase=0)
       expect(result.experimentResults).toHaveLength(1);
       expect(result.experimentResults[0].status).toBe("ok");
-      expect(result.experimentResults[0].ordersPlaced).toBe(2);
+      expect(result.experimentResults[0].ordersPlaced).toBe(1);
     });
   });
 

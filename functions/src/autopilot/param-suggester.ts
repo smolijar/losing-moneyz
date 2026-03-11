@@ -9,6 +9,7 @@ import {
   validateGridConfig,
   getGridSpacingPercent,
   getBudgetPerLevel,
+  calculateGridLevels,
 } from "../grid";
 import type { PriceTick } from "../backtest";
 
@@ -310,6 +311,8 @@ export function suggestParams(
   const finalValidation = validateGridConfig(config, currentPrice);
   if (!finalValidation.valid) return null;
 
+  config = biasInitialEntryTowardMarket(config, currentPrice, minSpacingPercent / 100);
+
   // Verify budget per level meets pair minimum
   const limits = getPairLimits(config.pair);
   const budgetPerLevel = getBudgetPerLevel(config);
@@ -327,5 +330,37 @@ export function suggestParams(
       desiredSpacingPercent,
       adjustments,
     },
+  };
+}
+
+function biasInitialEntryTowardMarket(
+  config: GridConfig,
+  currentPrice: number,
+  minSpacingRatio: number,
+): GridConfig {
+  const levels = calculateGridLevels(config);
+  const nearestBelow = [...levels]
+    .filter((level) => level.price < currentPrice)
+    .sort((a, b) => b.price - a.price)[0];
+
+  const targetGapRatio = Math.max(minSpacingRatio, 0.03);
+  const currentGapRatio = nearestBelow
+    ? (currentPrice - nearestBelow.price) / currentPrice
+    : Number.POSITIVE_INFINITY;
+
+  if (currentGapRatio <= targetGapRatio) {
+    return config;
+  }
+
+  const spacing = (config.upperPrice - config.lowerPrice) / (config.levels - 1);
+  const targetIndex = Math.floor((config.levels - 1) / 2);
+  const targetBuyPrice = Math.round(currentPrice * (1 - targetGapRatio) * 100) / 100;
+  const lowerPrice = Math.max(1, Math.round((targetBuyPrice - targetIndex * spacing) * 100) / 100);
+  const upperPrice = Math.round((lowerPrice + spacing * (config.levels - 1)) * 100) / 100;
+
+  return {
+    ...config,
+    lowerPrice,
+    upperPrice,
   };
 }
