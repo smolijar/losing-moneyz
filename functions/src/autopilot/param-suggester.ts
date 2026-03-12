@@ -343,7 +343,7 @@ function biasInitialEntryTowardMarket(
     .filter((level) => level.price < currentPrice)
     .sort((a, b) => b.price - a.price)[0];
 
-  const targetGapRatio = Math.max(minSpacingRatio, 0.03);
+  const targetGapRatio = Math.max(minSpacingRatio, 0.01);
   const currentGapRatio = nearestBelow
     ? (currentPrice - nearestBelow.price) / currentPrice
     : Number.POSITIVE_INFINITY;
