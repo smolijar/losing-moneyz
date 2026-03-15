@@ -338,7 +338,7 @@ describe("suggestParams", () => {
 
     expect(nearestBelow).toBeDefined();
     const gapPercent = ((currentPrice - nearestBelow.price) / currentPrice) * 100;
-    expect(gapPercent).toBeLessThanOrEqual(1.1);
+    expect(gapPercent).toBeLessThanOrEqual(0.6);
   });
 
   it("returns null if budget too low to meet minimum order size", () => {

@@ -275,7 +275,7 @@ export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
   cooldownMinutes: 10,
   minBudgetQuote: 500,
   enableStallAutofix: true,
-  stalledEntryMinutes: 60,
+  stalledEntryMinutes: 240,
   stalledActiveMinutes: 180,
   stalledPriceGapPercent: 1,
   stalledGridSpacingMultiplier: 1,
