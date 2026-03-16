@@ -311,7 +311,7 @@ export function suggestParams(
   const finalValidation = validateGridConfig(config, currentPrice);
   if (!finalValidation.valid) return null;
 
-  config = biasInitialEntryTowardMarket(config, currentPrice, minSpacingPercent / 100);
+  config = biasInitialEntryTowardMarket(config, currentPrice);
 
   // Verify budget per level meets pair minimum
   const limits = getPairLimits(config.pair);
@@ -336,14 +336,13 @@ export function suggestParams(
 function biasInitialEntryTowardMarket(
   config: GridConfig,
   currentPrice: number,
-  minSpacingRatio: number,
 ): GridConfig {
   const levels = calculateGridLevels(config);
   const nearestBelow = [...levels]
     .filter((level) => level.price < currentPrice)
     .sort((a, b) => b.price - a.price)[0];
 
-  const targetGapRatio = Math.max(minSpacingRatio, 0.005);
+  const targetGapRatio = 0.005;
   const currentGapRatio = nearestBelow
     ? (currentPrice - nearestBelow.price) / currentPrice
     : Number.POSITIVE_INFINITY;
