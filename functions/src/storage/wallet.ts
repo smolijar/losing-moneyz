@@ -25,9 +25,10 @@ export class WalletManager {
   async allocateForExperiment(
     experimentId: string,
     config: GridConfig,
+    allocation?: { quoteDelta?: number; baseDelta?: number },
   ): Promise<WalletOperationResult> {
-    const quoteDelta = config.budgetQuote;
-    const baseDelta = 0; // Grid bot starts with quote only
+    const quoteDelta = allocation?.quoteDelta ?? config.budgetQuote;
+    const baseDelta = allocation?.baseDelta ?? 0;
 
     const success = await this.repo.allocateWallet(quoteDelta, baseDelta);
 

@@ -403,6 +403,27 @@ describe("Autopilot", () => {
       expect(result.action).toBe("skipped");
       expect(result.reason).toContain("Insufficient capital");
     });
+
+    it("does not skip when quote is low but mixed inventory has enough total value", async () => {
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 617.55,
+        availableBase: 0.00275881,
+      });
+
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: makeOscillatingTransactions(1_540_000, 40_000, 500),
+        }),
+      });
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+    });
   });
 
   // ─── Exchange errors ───────────────────────────────────────────────
@@ -516,6 +537,36 @@ describe("Autopilot", () => {
       const wallet = await walletManager.getState();
       expect(wallet.totalAllocatedQuote).toBe(100_000);
       expect(wallet.availableQuote).toBe(0);
+    });
+
+    it("allocates mixed wallet balances for a base-aware restart", async () => {
+      const transactions = makeOscillatingTransactions(1_540_000, 40_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 617.55,
+        availableBase: 0.00275881,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const exp = await repo.getExperiment(result.experimentId!);
+      expect(exp!.allocatedQuote).toBeCloseTo(617.55);
+      expect(exp!.allocatedBase).toBeCloseTo(0.00275881);
+
+      const wallet = await walletManager.getState();
+      expect(wallet.availableQuote).toBeCloseTo(0);
+      expect(wallet.availableBase).toBeCloseTo(0);
+      expect(wallet.totalAllocatedBase).toBeCloseTo(0.00275881);
     });
 
     it("saves autopilot state after creating experiment", async () => {

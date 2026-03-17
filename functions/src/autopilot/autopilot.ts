@@ -2,6 +2,7 @@ import {
   type AutopilotConfig,
   type AutopilotState,
   AUTOPILOT_DEFAULTS,
+  COINMATE_FEES,
 } from "../config";
 import type { ExchangeClient } from "../coinmate";
 import type { Repository } from "../storage";
@@ -121,7 +122,7 @@ export class Autopilot {
 
     // 4. Pull wallet capital
     const wallet = await this.walletManager.getState();
-    if (wallet.availableQuote < this.config.minBudgetQuote) {
+    if (wallet.availableQuote < this.config.minBudgetQuote && wallet.availableBase <= 0.00000001) {
       const reason = `Insufficient capital: ${wallet.availableQuote.toFixed(2)} < ${this.config.minBudgetQuote}`;
       this.logger.info(`Autopilot skipped: ${reason}`);
       await this.saveState(null, `skipped:${reason}`);
@@ -164,10 +165,33 @@ export class Autopilot {
     // Sort ticks by timestamp ascending
     ticks.sort((a, b) => a.timestamp - b.timestamp);
 
+    const currentPrice = ticks[ticks.length - 1].price;
+    const managedQuoteEquivalent =
+      wallet.availableQuote + wallet.availableBase * currentPrice * (1 - COINMATE_FEES.maker);
+    if (managedQuoteEquivalent < this.config.minBudgetQuote) {
+      const reason =
+        `Insufficient capital: ${managedQuoteEquivalent.toFixed(2)} < ${this.config.minBudgetQuote}`;
+      this.logger.info(`Autopilot skipped: ${reason}`);
+      await this.saveState(null, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    const walletMode = this.getWalletMode(wallet);
+    this.logger.info("Autopilot wallet mode", {
+      mode: walletMode,
+      availableQuote: wallet.availableQuote,
+      availableBase: wallet.availableBase,
+      currentPrice,
+      managedQuoteEquivalent,
+    });
+
     // 6. Suggest parameters
-    const suggestion = suggestParams(ticks, wallet.availableQuote, this.config);
+    const suggestion = suggestParams(ticks, managedQuoteEquivalent, this.config);
     if (!suggestion) {
-      const reason = "Parameter suggestion failed (could not find valid config)";
+      const reason =
+        walletMode === "mixed" || walletMode === "base_only"
+          ? "Parameter suggestion failed (could not find valid config for current wallet composition)"
+          : "Parameter suggestion failed (could not find valid config)";
       this.logger.warn(`Autopilot skipped: ${reason}`);
       await this.saveState(null, `skipped:${reason}`);
       return { action: "skipped", reason };
@@ -223,6 +247,10 @@ export class Autopilot {
     const allocation = await this.walletManager.allocateForExperiment(
       experimentId,
       suggested.config,
+      {
+        quoteDelta: wallet.availableQuote,
+        baseDelta: wallet.availableBase,
+      },
     );
 
     if (!allocation.success) {
@@ -255,6 +283,19 @@ export class Autopilot {
       experimentId,
       config: suggested.config,
     };
+  }
+
+  private getWalletMode(wallet: { availableQuote: number; availableBase: number }):
+    | "quote_only"
+    | "base_only"
+    | "mixed"
+    | "empty" {
+    const hasQuote = wallet.availableQuote > 0.01;
+    const hasBase = wallet.availableBase > 0.00000001;
+    if (hasQuote && hasBase) return "mixed";
+    if (hasQuote) return "quote_only";
+    if (hasBase) return "base_only";
+    return "empty";
   }
 
   private async saveState(
