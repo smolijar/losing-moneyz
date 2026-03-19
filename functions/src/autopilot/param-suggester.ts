@@ -26,6 +26,8 @@ export interface SuggestResult {
   };
 }
 
+export type EntryBiasMode = "buy_bootstrap" | "sell_resume";
+
 /** A deliberate skip when market conditions are unsuitable for grid trading. */
 export interface SuggestSkip {
   skipped: true;
@@ -200,6 +202,7 @@ export function suggestParams(
   ticks: PriceTick[],
   availableQuote: number,
   autopilotConfig: AutopilotConfig = AUTOPILOT_DEFAULTS,
+  entryBiasMode: EntryBiasMode = "buy_bootstrap",
 ): SuggestResult | SuggestSkip | null {
   if (ticks.length < 10) return null;
 
@@ -311,7 +314,7 @@ export function suggestParams(
   const finalValidation = validateGridConfig(config, currentPrice);
   if (!finalValidation.valid) return null;
 
-  config = biasInitialEntryTowardMarket(config, currentPrice);
+  config = biasInitialEntryTowardMarket(config, currentPrice, entryBiasMode);
 
   // Verify budget per level meets pair minimum
   const limits = getPairLimits(config.pair);
@@ -336,15 +339,19 @@ export function suggestParams(
 function biasInitialEntryTowardMarket(
   config: GridConfig,
   currentPrice: number,
+  mode: EntryBiasMode,
 ): GridConfig {
   const levels = calculateGridLevels(config);
-  const nearestBelow = [...levels]
-    .filter((level) => level.price < currentPrice)
-    .sort((a, b) => b.price - a.price)[0];
+  const targetGapRatio = mode === "sell_resume" ? 0.0075 : 0.005;
+  const nearestLevel =
+    mode === "sell_resume"
+      ? [...levels].filter((level) => level.price > currentPrice).sort((a, b) => a.price - b.price)[0]
+      : [...levels].filter((level) => level.price < currentPrice).sort((a, b) => b.price - a.price)[0];
 
-  const targetGapRatio = 0.005;
-  const currentGapRatio = nearestBelow
-    ? (currentPrice - nearestBelow.price) / currentPrice
+  const currentGapRatio = nearestLevel
+    ? mode === "sell_resume"
+      ? (nearestLevel.price - currentPrice) / currentPrice
+      : (currentPrice - nearestLevel.price) / currentPrice
     : Number.POSITIVE_INFINITY;
 
   if (currentGapRatio <= targetGapRatio) {
@@ -353,8 +360,11 @@ function biasInitialEntryTowardMarket(
 
   const spacing = (config.upperPrice - config.lowerPrice) / (config.levels - 1);
   const targetIndex = Math.floor((config.levels - 1) / 2);
-  const targetBuyPrice = Math.round(currentPrice * (1 - targetGapRatio) * 100) / 100;
-  const lowerPrice = Math.max(1, Math.round((targetBuyPrice - targetIndex * spacing) * 100) / 100);
+  const targetPrice =
+    mode === "sell_resume"
+      ? Math.round(currentPrice * (1 + targetGapRatio) * 100) / 100
+      : Math.round(currentPrice * (1 - targetGapRatio) * 100) / 100;
+  const lowerPrice = Math.max(1, Math.round((targetPrice - targetIndex * spacing) * 100) / 100);
   const upperPrice = Math.round((lowerPrice + spacing * (config.levels - 1)) * 100) / 100;
 
   return {

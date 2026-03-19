@@ -1213,14 +1213,35 @@ export class GridTickOrchestrator {
     historicalFilled: OrderRecord[],
     fills: FillEvent[],
   ): OrderAction[] {
-    const isFreshEntry =
-      experiment.allocatedBase <= 0 &&
-      previousOrders.length === 0 &&
-      historicalFilled.length === 0 &&
-      fills.length === 0;
+    const isInitialPlacement =
+      previousOrders.length === 0 && historicalFilled.length === 0 && fills.length === 0;
 
-    if (!isFreshEntry) {
+    if (!isInitialPlacement) {
       return actions;
+    }
+
+    if (experiment.allocatedBase > 0) {
+      const sellPlaces: Array<Extract<OrderAction, { type: "place" }>> = [];
+      for (const action of actions) {
+        if (action.type === "place" && action.side === "sell") {
+          sellPlaces.push(action);
+        }
+      }
+      sellPlaces.sort((a, b) => a.price - b.price);
+
+      if (sellPlaces.length <= 1) {
+        return actions.filter((action) => action.type !== "place" || action.side !== "buy");
+      }
+
+      const nearestSell = sellPlaces[0];
+      return actions.filter(
+        (action) =>
+          action.type === "cancel" ||
+          (action.type === "place" &&
+            action.side === "sell" &&
+            action.gridLevel === nearestSell.gridLevel &&
+            action.price === nearestSell.price),
+      );
     }
 
     const buyPlaces: Array<Extract<OrderAction, { type: "place" }>> = [];

@@ -328,7 +328,7 @@ describe("suggestParams", () => {
       rangeMultiplier: 2.0,
       spacingMultiplier: 5.0,
     };
-    const result = suggestParams(ticks, 5_000, sparseConfig);
+    const result = suggestParams(ticks, 5_000, sparseConfig, "buy_bootstrap");
 
     const suggested = expectSuggested(result);
     const currentPrice = suggested.metrics.currentPrice;
@@ -339,6 +339,26 @@ describe("suggestParams", () => {
     expect(nearestBelow).toBeDefined();
     const gapPercent = ((currentPrice - nearestBelow.price) / currentPrice) * 100;
     expect(gapPercent).toBeLessThanOrEqual(0.6);
+  });
+
+  it("biases the nearest resume sell toward market for sparse grids", () => {
+    const ticks = makeOscillatingTicks(1_450_000, 1_550_000, 500);
+    const sparseConfig: AutopilotConfig = {
+      ...AUTOPILOT_DEFAULTS,
+      rangeMultiplier: 2.0,
+      spacingMultiplier: 5.0,
+    };
+    const result = suggestParams(ticks, 5_000, sparseConfig, "sell_resume");
+
+    const suggested = expectSuggested(result);
+    const currentPrice = suggested.metrics.currentPrice;
+    const nearestAbove = calculateGridLevels(suggested.config)
+      .filter((level) => level.price > currentPrice)
+      .sort((a, b) => a.price - b.price)[0];
+
+    expect(nearestAbove).toBeDefined();
+    const gapPercent = ((nearestAbove.price - currentPrice) / currentPrice) * 100;
+    expect(gapPercent).toBeLessThanOrEqual(0.8);
   });
 
   it("returns null if budget too low to meet minimum order size", () => {

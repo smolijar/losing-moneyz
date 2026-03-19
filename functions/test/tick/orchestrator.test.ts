@@ -186,6 +186,53 @@ describe("GridTickOrchestrator", () => {
       expect(client.sellLimit).toHaveBeenCalledTimes(0);
     });
 
+    it("places only the nearest resume sell on first tick when base is allocated", async () => {
+      const mixedGridConfig: GridConfig = {
+        pair: "BTC_CZK",
+        lowerPrice: 1_500_000,
+        upperPrice: 1_530_000,
+        levels: 3,
+        budgetQuote: 5_000,
+      };
+      const id = await repo.createExperiment({
+        status: "active",
+        gridConfig: mixedGridConfig,
+        allocatedQuote: 617.55,
+        allocatedBase: 0.00275881,
+        consecutiveFailures: 0,
+      });
+
+      const client = createMockClient({
+        getTicker: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            last: 1_507_500,
+            high: 1_520_000,
+            low: 1_510_000,
+            amount: 10,
+            bid: 1_507_000,
+            ask: 1_508_000,
+            change: 0,
+            open: 1_507_500,
+            timestamp: Date.now(),
+          },
+        }),
+      });
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger);
+
+      const result = await orchestrator.executeTick();
+
+      const expResult = result.experimentResults.find((r) => r.experimentId === id)!;
+      expect(expResult.ordersPlaced).toBe(1);
+      expect(client.sellLimit).toHaveBeenCalledTimes(1);
+      expect(client.buyLimit).toHaveBeenCalledTimes(0);
+
+      const orders = await repo.getOrders(id);
+      expect(orders.length).toBe(1);
+      expect(orders[0].side).toBe("sell");
+      expect(orders[0].price).toBe(1_515_000);
+    });
+
     it("records placed orders in the repository", async () => {
       const { id } = await seedExperiment(repo);
 

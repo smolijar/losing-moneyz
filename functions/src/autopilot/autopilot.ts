@@ -186,7 +186,12 @@ export class Autopilot {
     });
 
     // 6. Suggest parameters
-    const suggestion = suggestParams(ticks, managedQuoteEquivalent, this.config);
+    const suggestion = suggestParams(
+      ticks,
+      managedQuoteEquivalent,
+      this.config,
+      walletMode === "mixed" || walletMode === "base_only" ? "sell_resume" : "buy_bootstrap",
+    );
     if (!suggestion) {
       const reason =
         walletMode === "mixed" || walletMode === "base_only"

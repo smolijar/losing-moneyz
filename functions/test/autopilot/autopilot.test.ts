@@ -569,6 +569,38 @@ describe("Autopilot", () => {
       expect(wallet.totalAllocatedBase).toBeCloseTo(0.00275881);
     });
 
+    it("shapes mixed-wallet restart config so the nearest sell is near market", async () => {
+      const transactions = makeOscillatingTransactions(1_540_000, 40_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 617.55,
+        availableBase: 0.00275881,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const currentPrice = transactions[transactions.length - 1].price;
+      const exp = await repo.getExperiment(result.experimentId!);
+      const levels = [
+        exp!.gridConfig.lowerPrice,
+        (exp!.gridConfig.lowerPrice + exp!.gridConfig.upperPrice) / 2,
+        exp!.gridConfig.upperPrice,
+      ];
+      const nearestSell = levels.filter((price) => price > currentPrice).sort((a, b) => a - b)[0];
+      const gapPercent = ((nearestSell - currentPrice) / currentPrice) * 100;
+      expect(gapPercent).toBeLessThanOrEqual(0.8);
+    });
+
     it("saves autopilot state after creating experiment", async () => {
       const transactions = makeOscillatingTransactions(2_200_000, 100_000, 500);
       const client = createMockClient({
