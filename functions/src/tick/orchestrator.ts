@@ -1229,19 +1229,25 @@ export class GridTickOrchestrator {
       }
       sellPlaces.sort((a, b) => a.price - b.price);
 
-      if (sellPlaces.length <= 1) {
+      // If there are viable sell actions, bootstrap with the nearest sell only.
+      // If no sells are viable (e.g. allocated base too small for min order size),
+      // fall through to the buy-bootstrap logic below instead of returning nothing.
+      if (sellPlaces.length === 1) {
         return actions.filter((action) => action.type !== "place" || action.side !== "buy");
       }
 
-      const nearestSell = sellPlaces[0];
-      return actions.filter(
-        (action) =>
-          action.type === "cancel" ||
-          (action.type === "place" &&
-            action.side === "sell" &&
-            action.gridLevel === nearestSell.gridLevel &&
-            action.price === nearestSell.price),
-      );
+      if (sellPlaces.length > 1) {
+        const nearestSell = sellPlaces[0];
+        return actions.filter(
+          (action) =>
+            action.type === "cancel" ||
+            (action.type === "place" &&
+              action.side === "sell" &&
+              action.gridLevel === nearestSell.gridLevel &&
+              action.price === nearestSell.price),
+        );
+      }
+      // sellPlaces.length === 0: fall through to buy-bootstrap logic
     }
 
     const buyPlaces: Array<Extract<OrderAction, { type: "place" }>> = [];

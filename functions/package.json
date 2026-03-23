@@ -15,6 +15,7 @@
     "status": "tsx scripts/status.ts",
     "experiment:create": "tsx scripts/experiment-create.ts",
     "experiment:stop": "tsx scripts/experiment-stop.ts",
+    "experiment:cleanup": "tsx scripts/experiment-cleanup.ts",
     "wallet:sync": "tsx scripts/wallet-sync.ts"
   },
   "engines": {

@@ -233,6 +233,56 @@ describe("GridTickOrchestrator", () => {
       expect(orders[0].price).toBe(1_515_000);
     });
 
+    it("falls through to buy bootstrap when base is allocated but too small for sell orders", async () => {
+      // Scenario: wallet has tiny BTC (below min order size for any sell level)
+      // plus some CZK. The bootstrap limiter should fall through to buy logic
+      // instead of returning 0 actions.
+      const mixedGridConfig: GridConfig = {
+        pair: "BTC_CZK",
+        lowerPrice: 1_400_000,
+        upperPrice: 1_600_000,
+        levels: 3,
+        budgetQuote: 3_000,
+      };
+      const id = await repo.createExperiment({
+        status: "active",
+        gridConfig: mixedGridConfig,
+        allocatedQuote: 3_000,
+        allocatedBase: 0.00005, // well below 0.0002 BTC min order size
+        consecutiveFailures: 0,
+      });
+
+      const client = createMockClient({
+        getTicker: vi.fn().mockResolvedValue({
+          error: false,
+          data: {
+            last: 1_500_000,
+            high: 1_520_000,
+            low: 1_480_000,
+            amount: 10,
+            bid: 1_499_000,
+            ask: 1_501_000,
+            change: 0,
+            open: 1_500_000,
+            timestamp: Date.now(),
+          },
+        }),
+      });
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger);
+
+      const result = await orchestrator.executeTick();
+
+      const expResult = result.experimentResults.find((r) => r.experimentId === id)!;
+      // Should place 1 buy order (nearest to market), NOT 0
+      expect(expResult.ordersPlaced).toBe(1);
+      expect(client.buyLimit).toHaveBeenCalledTimes(1);
+      expect(client.sellLimit).toHaveBeenCalledTimes(0);
+
+      const orders = await repo.getOrders(id);
+      expect(orders.length).toBe(1);
+      expect(orders[0].side).toBe("buy");
+    });
+
     it("records placed orders in the repository", async () => {
       const { id } = await seedExperiment(repo);
 

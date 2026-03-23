@@ -569,6 +569,33 @@ describe("Autopilot", () => {
       expect(wallet.totalAllocatedBase).toBeCloseTo(0.00275881);
     });
 
+    it("reconciles budgetQuote to match actual CZK allocation in mixed-wallet mode", async () => {
+      const transactions = makeOscillatingTransactions(1_540_000, 40_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 617.55,
+        availableBase: 0.00275881,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const exp = await repo.getExperiment(result.experimentId!);
+      // budgetQuote should be reconciled to match allocatedQuote (CZK-only portion)
+      // rather than the combined CZK + BTC equivalent that suggestParams used
+      expect(exp!.gridConfig.budgetQuote).toBeCloseTo(617.55);
+      expect(exp!.allocatedQuote).toBeCloseTo(617.55);
+    });
+
     it("shapes mixed-wallet restart config so the nearest sell is near market", async () => {
       const transactions = makeOscillatingTransactions(1_540_000, 40_000, 500);
       const client = createMockClient({

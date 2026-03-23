@@ -270,6 +270,22 @@ export class Autopilot {
       return { action: "skipped", reason };
     }
 
+    // 10. Reconcile budgetQuote to match actual CZK allocation.
+    // In mixed-wallet mode, suggestParams used managedQuoteEquivalent (CZK + BTC value)
+    // as budgetQuote, but allocateForExperiment sets allocatedQuote to just the CZK portion.
+    // Without this, budgetPerLevel is computed from the inflated budgetQuote, sizing orders
+    // too large for the actual CZK available, so fewer buy orders can be placed.
+    if (wallet.availableQuote < suggested.config.budgetQuote - 0.01) {
+      const reconciledConfig = { ...suggested.config, budgetQuote: wallet.availableQuote };
+      await this.repo.updateExperiment(experimentId, { gridConfig: reconciledConfig });
+      this.logger.info("Reconciled budgetQuote to match actual CZK allocation", {
+        experimentId,
+        originalBudgetQuote: suggested.config.budgetQuote,
+        reconciledBudgetQuote: wallet.availableQuote,
+        allocatedBase: wallet.availableBase,
+      });
+    }
+
     await this.saveState(suggested.config, "created");
 
     this.logger.info("Autopilot created experiment", {
