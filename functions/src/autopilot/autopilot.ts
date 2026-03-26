@@ -3,6 +3,7 @@ import {
   type AutopilotState,
   AUTOPILOT_DEFAULTS,
   COINMATE_FEES,
+  getPairLimits,
 } from "../config";
 import type { ExchangeClient } from "../coinmate";
 import type { Repository } from "../storage";
@@ -176,7 +177,7 @@ export class Autopilot {
       return { action: "skipped", reason };
     }
 
-    const walletMode = this.getWalletMode(wallet);
+    const walletMode = this.getWalletMode(wallet, currentPrice);
     this.logger.info("Autopilot wallet mode", {
       mode: walletMode,
       availableQuote: wallet.availableQuote,
@@ -185,12 +186,32 @@ export class Autopilot {
       managedQuoteEquivalent,
     });
 
-    // 6. Suggest parameters
+    // 6. Determine entry bias mode.
+    // Even when the wallet holds some base, use sell_resume only if the base
+    // can cover at least one grid-level sell order.  Otherwise the grid will
+    // be biased toward sells the bot cannot execute, pushing the only buy far
+    // below market — which triggers stall detection and a recycle loop.
+    let entryBiasMode: "buy_bootstrap" | "sell_resume" = "buy_bootstrap";
+    if (walletMode === "mixed" || walletMode === "base_only") {
+      const { minOrderSize } = getPairLimits(this.config.pair);
+      const minLevels = COINMATE_FEES.minSpacingMultiplier;
+      const estimatedSellSize = managedQuoteEquivalent / Math.ceil(minLevels / 2) / currentPrice;
+      const sellViable = wallet.availableBase >= Math.max(minOrderSize, estimatedSellSize);
+      entryBiasMode = sellViable ? "sell_resume" : "buy_bootstrap";
+      if (!sellViable) {
+        this.logger.info("Entry bias fallback: base insufficient for sells, using buy_bootstrap", {
+          availableBase: wallet.availableBase,
+          estimatedSellSize,
+          minOrderSize,
+        });
+      }
+    }
+
     const suggestion = suggestParams(
       ticks,
       managedQuoteEquivalent,
       this.config,
-      walletMode === "mixed" || walletMode === "base_only" ? "sell_resume" : "buy_bootstrap",
+      entryBiasMode,
     );
     if (!suggestion) {
       const reason =
@@ -306,13 +327,22 @@ export class Autopilot {
     };
   }
 
-  private getWalletMode(wallet: { availableQuote: number; availableBase: number }):
+  private getWalletMode(
+    wallet: { availableQuote: number; availableBase: number },
+    currentPrice: number,
+  ):
     | "quote_only"
     | "base_only"
     | "mixed"
     | "empty" {
     const hasQuote = wallet.availableQuote > 0.01;
-    const hasBase = wallet.availableBase > 0.00000001;
+    // Treat base as meaningful only when its value exceeds 10% of total capital.
+    // Tiny BTC dust from previous partial fills should not trigger sell_resume mode,
+    // which shifts the grid so the nearest sell is near market and pushes the only
+    // buy far away — causing a stall/recycle loop when the dust is too small to sell.
+    const baseValueQuote = wallet.availableBase * currentPrice;
+    const totalValue = wallet.availableQuote + baseValueQuote;
+    const hasBase = totalValue > 0 && baseValueQuote / totalValue > 0.1;
     if (hasQuote && hasBase) return "mixed";
     if (hasQuote) return "quote_only";
     if (hasBase) return "base_only";

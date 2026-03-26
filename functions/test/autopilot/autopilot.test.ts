@@ -654,6 +654,125 @@ describe("Autopilot", () => {
     });
   });
 
+  // ─── Dust wallet handling ──────────────────────────────────────────
+
+  describe("dust wallet handling", () => {
+    it("treats BTC dust (<10% of capital) as quote_only and uses buy_bootstrap", async () => {
+      // Simulates the production scenario: 0.00021523 BTC dust (~317 CZK)
+      // with ~4,421 CZK available — BTC is ~6.7% of total, below 10% threshold.
+      const transactions = makeOscillatingTransactions(1_480_000, 40_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 4_421,
+        availableBase: 0.00021523, // dust: ~317 CZK at 1.48M, ~6.7% of capital
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const currentPrice = transactions[transactions.length - 1].price;
+      const exp = await repo.getExperiment(result.experimentId!);
+
+      // With buy_bootstrap, the nearest buy should be close to market (within ~1%),
+      // NOT 8+% below market as with sell_resume + dust.
+      const levels = [
+        exp!.gridConfig.lowerPrice,
+        (exp!.gridConfig.lowerPrice + exp!.gridConfig.upperPrice) / 2,
+        exp!.gridConfig.upperPrice,
+      ];
+      const nearestBuy = levels.filter((price) => price < currentPrice).sort((a, b) => b - a)[0];
+      const buyGapPercent = ((currentPrice - nearestBuy) / currentPrice) * 100;
+      expect(buyGapPercent).toBeLessThanOrEqual(1.5);
+    });
+
+    it("uses sell_resume when base is genuinely sufficient for sells (>10% of capital)", async () => {
+      // This mirrors the existing test at line 599 — wallet with 0.00275881 BTC
+      // (~87% of capital) should still use sell_resume mode.
+      const transactions = makeOscillatingTransactions(1_540_000, 40_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 617.55,
+        availableBase: 0.00275881,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const currentPrice = transactions[transactions.length - 1].price;
+      const exp = await repo.getExperiment(result.experimentId!);
+
+      // With sell_resume, the nearest sell should be near market (within 0.8%).
+      const levels = [
+        exp!.gridConfig.lowerPrice,
+        (exp!.gridConfig.lowerPrice + exp!.gridConfig.upperPrice) / 2,
+        exp!.gridConfig.upperPrice,
+      ];
+      const nearestSell = levels.filter((price) => price > currentPrice).sort((a, b) => a - b)[0];
+      const gapPercent = ((nearestSell - currentPrice) / currentPrice) * 100;
+      expect(gapPercent).toBeLessThanOrEqual(0.8);
+    });
+
+    it("falls back to buy_bootstrap when wallet is mixed but base cannot cover a sell order", async () => {
+      // Wallet has >10% base by value but the absolute amount is too small to
+      // fill even one grid-level sell order.
+      const priceCenter = 1_500_000;
+      const transactions = makeOscillatingTransactions(priceCenter, 40_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      // ~750 CZK in BTC (50% of 1500 total) → walletMode=mixed
+      // but 0.0005 BTC is less than estimated sell size (~0.0005 at this budget),
+      // and the estimatedSellSize scales with managedQuoteEquivalent.
+      // With 750 + 750 = 1500 CZK total, sell size = 1500 / 2 / 1_500_000 = 0.0005
+      // Make base slightly below the estimated sell size.
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 750,
+        availableBase: 0.00045, // ~675 CZK at 1.5M, ~47% of capital but too small for sells
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const currentPrice = transactions[transactions.length - 1].price;
+      const exp = await repo.getExperiment(result.experimentId!);
+
+      // Should use buy_bootstrap (nearest BUY within ~1% of market)
+      const levels = [
+        exp!.gridConfig.lowerPrice,
+        (exp!.gridConfig.lowerPrice + exp!.gridConfig.upperPrice) / 2,
+        exp!.gridConfig.upperPrice,
+      ];
+      const nearestBuy = levels.filter((price) => price < currentPrice).sort((a, b) => b - a)[0];
+      const buyGapPercent = ((currentPrice - nearestBuy) / currentPrice) * 100;
+      expect(buyGapPercent).toBeLessThanOrEqual(1.5);
+    });
+  });
+
   // ─── Wallet allocation failure ─────────────────────────────────────
 
   describe("wallet allocation failure", () => {
