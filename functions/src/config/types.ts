@@ -260,6 +260,20 @@ export interface AutopilotConfig {
   regridCooldownMinutes: number;
   /** Minimum backtest improvement score required before replacing */
   replacementImprovementThreshold: number;
+
+  // ─── Adaptive parameter search ──────────────────────────────────────────────
+  /** Enable multi-candidate parameter search via backtesting (vs single deterministic config) */
+  enableParamSearch: boolean;
+  /** Minimum completed buy-sell cycles required to accept a search candidate */
+  paramSearchMinCompletedCycles: number;
+  /** Range of spacingMultiplier values to sweep [min, max] */
+  paramSearchSpacingMultiplierRange: [number, number];
+  /** Range of rangeMultiplier values to sweep [min, max] */
+  paramSearchRangeMultiplierRange: [number, number];
+  /** Step size for spacingMultiplier sweep */
+  paramSearchSpacingStep: number;
+  /** Step size for rangeMultiplier sweep */
+  paramSearchRangeStep: number;
 }
 
 /** Default autopilot configuration */
@@ -283,6 +297,12 @@ export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
   capitalIncreaseThresholdPercent: 20,
   regridCooldownMinutes: 360,
   replacementImprovementThreshold: 5,
+  enableParamSearch: true,
+  paramSearchMinCompletedCycles: 1,
+  paramSearchSpacingMultiplierRange: [1.0, 2.5] as [number, number],
+  paramSearchRangeMultiplierRange: [1.0, 3.0] as [number, number],
+  paramSearchSpacingStep: 0.25,
+  paramSearchRangeStep: 0.5,
 };
 
 /** Autopilot state persisted to Firestore */

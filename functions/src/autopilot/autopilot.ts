@@ -9,7 +9,7 @@ import type { ExchangeClient } from "../coinmate";
 import type { Repository } from "../storage";
 import { WalletManager } from "../storage";
 import { validateWithBacktest, type PriceTick } from "../backtest";
-import { suggestParams, type SuggestResult, type SuggestSkip } from "./param-suggester";
+import { searchBestParams, type SuggestResult, type SuggestSkip } from "./param-suggester";
 import type { Logger } from "../tick";
 
 /** Result of an autopilot engagement attempt */
@@ -207,7 +207,7 @@ export class Autopilot {
       }
     }
 
-    const suggestion = suggestParams(
+    const suggestion = searchBestParams(
       ticks,
       managedQuoteEquivalent,
       this.config,

@@ -15,7 +15,7 @@ import {
 import type { Repository } from "../storage";
 import type { WalletManager } from "../storage";
 import { Autopilot, type AutopilotResult } from "../autopilot";
-import { suggestParams } from "../autopilot/param-suggester";
+import { searchBestParams } from "../autopilot/param-suggester";
 import { validateWithBacktest, type PriceTick } from "../backtest";
 import {
   runAllSafeguards,
@@ -1006,7 +1006,7 @@ export class GridTickOrchestrator {
     }));
     ticks.sort((a, b) => a.timestamp - b.timestamp);
 
-    const suggestion = suggestParams(ticks, totalCapital, this.autopilotConfig);
+    const suggestion = searchBestParams(ticks, totalCapital, this.autopilotConfig);
     if (!suggestion || "skipped" in suggestion) {
       await this.repo.updateAutopilotState({
         lastSupervisorDecision:

@@ -11,7 +11,7 @@ import {
   getBudgetPerLevel,
   calculateGridLevels,
 } from "../grid";
-import type { PriceTick } from "../backtest";
+import { type PriceTick, runBacktest, type BacktestReport } from "../backtest";
 
 /** Result of parameter suggestion */
 export interface SuggestResult {
@@ -334,6 +334,159 @@ export function suggestParams(
       adjustments,
     },
   };
+}
+
+/**
+ * Score a backtest report for candidate comparison.
+ *
+ * Components:
+ * - Primary: totalReturnPercent (higher is better)
+ * - Penalty: excess drawdown beyond 15% (penalized at 0.5x)
+ * - Bonus: completed cycles (capped at 20, weighted 0.1 each)
+ */
+export function scoreBacktestReport(report: BacktestReport): number {
+  return (
+    report.totalReturnPercent -
+    Math.max(0, report.maxDrawdownPercent - 15) * 0.5 +
+    Math.min(report.completedCycles, 20) * 0.1
+  );
+}
+
+/** Extended result that includes search metadata */
+export interface SearchResult extends SuggestResult {
+  /** Whether the result came from parameter search (vs single-config fallback) */
+  fromSearch: boolean;
+  /** Number of candidates evaluated */
+  candidatesEvaluated: number;
+  /** Number of candidates that had completedCycles > 0 */
+  candidatesWithCycles: number;
+  /** Score of the selected candidate */
+  selectedScore: number;
+}
+
+/**
+ * Search for the best grid parameters by sweeping over spacing/range multiplier
+ * combinations and backtesting each candidate against recent price history.
+ *
+ * Falls back to single-config `suggestParams()` when:
+ * - `enableParamSearch` is false
+ * - No candidate achieves the minimum completed cycles
+ * - All candidates are rejected (trending market, budget too low, etc.)
+ */
+export function searchBestParams(
+  ticks: PriceTick[],
+  availableQuote: number,
+  autopilotConfig: AutopilotConfig = AUTOPILOT_DEFAULTS,
+  entryBiasMode: EntryBiasMode = "buy_bootstrap",
+): SuggestResult | SearchResult | SuggestSkip | null {
+  // Feature flag — bypass search entirely
+  if (!autopilotConfig.enableParamSearch) {
+    return suggestParams(ticks, availableQuote, autopilotConfig, entryBiasMode);
+  }
+
+  // Need enough ticks for both param suggestion and backtesting
+  if (ticks.length < 10) return null;
+
+  const [spacingMin, spacingMax] = autopilotConfig.paramSearchSpacingMultiplierRange;
+  const [rangeMin, rangeMax] = autopilotConfig.paramSearchRangeMultiplierRange;
+  const spacingStep = autopilotConfig.paramSearchSpacingStep;
+  const rangeStep = autopilotConfig.paramSearchRangeStep;
+  const minCycles = autopilotConfig.paramSearchMinCompletedCycles;
+
+  // Generate candidate multiplier pairs
+  const candidates: Array<{
+    spacingMultiplier: number;
+    rangeMultiplier: number;
+    suggestion: SuggestResult;
+    report: BacktestReport;
+    score: number;
+  }> = [];
+
+  let lastSkip: SuggestSkip | null = null;
+
+  for (
+    let sm = spacingMin;
+    sm <= spacingMax + 1e-9; // float tolerance
+    sm += spacingStep
+  ) {
+    for (
+      let rm = rangeMin;
+      rm <= rangeMax + 1e-9;
+      rm += rangeStep
+    ) {
+      // Override just the multipliers, keep everything else
+      const candidateConfig: AutopilotConfig = {
+        ...autopilotConfig,
+        spacingMultiplier: Math.round(sm * 100) / 100,
+        rangeMultiplier: Math.round(rm * 100) / 100,
+      };
+
+      const result = suggestParams(ticks, availableQuote, candidateConfig, entryBiasMode);
+
+      // Track the last skip reason (all candidates share the same trend detection)
+      if (result && "skipped" in result) {
+        lastSkip = result;
+        continue;
+      }
+      if (!result) continue;
+
+      // Backtest this candidate against the same price history
+      try {
+        const report = runBacktest(result.config, ticks);
+        const score = scoreBacktestReport(report);
+        candidates.push({
+          spacingMultiplier: candidateConfig.spacingMultiplier,
+          rangeMultiplier: candidateConfig.rangeMultiplier,
+          suggestion: result,
+          report,
+          score,
+        });
+      } catch {
+        // Backtest can throw on degenerate configs — skip silently
+        continue;
+      }
+    }
+  }
+
+  // If ALL candidates were skipped due to trending, propagate that
+  if (candidates.length === 0 && lastSkip) {
+    return lastSkip;
+  }
+
+  // Filter to candidates with enough completed cycles
+  const viable = candidates.filter((c) => c.report.completedCycles >= minCycles);
+
+  if (viable.length > 0) {
+    // Sort by score descending, pick the best
+    viable.sort((a, b) => b.score - a.score);
+    const best = viable[0];
+
+    const searchResult: SearchResult = {
+      ...best.suggestion,
+      fromSearch: true,
+      candidatesEvaluated: candidates.length,
+      candidatesWithCycles: viable.length,
+      selectedScore: best.score,
+      metrics: {
+        ...best.suggestion.metrics,
+        adjustments: [
+          ...best.suggestion.metrics.adjustments,
+          `Selected by param search: score=${best.score.toFixed(2)}, ` +
+            `cycles=${best.report.completedCycles}, ` +
+            `return=${best.report.totalReturnPercent.toFixed(2)}%, ` +
+            `drawdown=${best.report.maxDrawdownPercent.toFixed(2)}%, ` +
+            `spacing=${best.spacingMultiplier}x, range=${best.rangeMultiplier}x ` +
+            `(${viable.length}/${candidates.length} candidates viable)`,
+        ],
+      },
+    };
+
+    return searchResult;
+  }
+
+  // No viable candidate with cycles — fall back to original single-config
+  // This ensures we don't regress: worst case we return what we would have before
+  return suggestParams(ticks, availableQuote, autopilotConfig, entryBiasMode);
 }
 
 function biasInitialEntryTowardMarket(

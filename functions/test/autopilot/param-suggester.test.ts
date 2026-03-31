@@ -4,10 +4,12 @@ import {
   resampleToCandles,
   computeDailyVolatility,
   suggestParams,
+  searchBestParams,
+  scoreBacktestReport,
 } from "../../src/autopilot";
 import { calculateGridLevels } from "../../src/grid";
-import type { PriceTick } from "../../src/backtest";
-import { AUTOPILOT_DEFAULTS, type AutopilotConfig } from "../../src/config";
+import type { PriceTick, BacktestReport } from "../../src/backtest";
+import { AUTOPILOT_DEFAULTS, type AutopilotConfig, type GridConfig } from "../../src/config";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -422,6 +424,217 @@ describe("suggestParams", () => {
     if (result && !("skipped" in result)) {
       // COINMATE_FEES.maker * 2 * 100 * minSpacingMultiplier = 0.004 * 2 * 100 * 3 = 2.4%
       expect(result.metrics.desiredSpacingPercent).toBeGreaterThanOrEqual(2.4);
+    }
+  });
+});
+
+// ─── scoreBacktestReport ─────────────────────────────────────────────────────
+
+describe("scoreBacktestReport", () => {
+  function makeReport(overrides: Partial<BacktestReport>): BacktestReport {
+    return {
+      config: {
+        upperPrice: 2_400_000,
+        lowerPrice: 2_000_000,
+        levels: 5,
+        budgetQuote: 100_000,
+        pair: "BTC_CZK",
+      },
+      periodDays: 1,
+      startingQuote: 100_000,
+      endingQuote: 101_000,
+      endingBase: 0,
+      totalReturn: 1_000,
+      totalReturnPercent: 1,
+      annualizedReturnPercent: 365,
+      maxDrawdownPercent: 5,
+      totalTrades: 10,
+      completedCycles: 5,
+      avgProfitPerCycle: 200,
+      totalFees: 50,
+      gridUtilizationPercent: 60,
+      profitable: true,
+      pnlTimeseries: [],
+      ...overrides,
+    };
+  }
+
+  it("returns higher score for higher return", () => {
+    const low = scoreBacktestReport(makeReport({ totalReturnPercent: 1 }));
+    const high = scoreBacktestReport(makeReport({ totalReturnPercent: 5 }));
+    expect(high).toBeGreaterThan(low);
+  });
+
+  it("penalizes drawdown above 15%", () => {
+    const safe = scoreBacktestReport(makeReport({ maxDrawdownPercent: 10 }));
+    const risky = scoreBacktestReport(makeReport({ maxDrawdownPercent: 25 }));
+    expect(safe).toBeGreaterThan(risky);
+  });
+
+  it("does not penalize drawdown at or below 15%", () => {
+    const at10 = scoreBacktestReport(makeReport({ maxDrawdownPercent: 10 }));
+    const at15 = scoreBacktestReport(makeReport({ maxDrawdownPercent: 15 }));
+    // Same totalReturn and completedCycles — only drawdown differs, but both below threshold
+    expect(at10).toBe(at15);
+  });
+
+  it("gives a small bonus for more completed cycles", () => {
+    const few = scoreBacktestReport(makeReport({ completedCycles: 2 }));
+    const many = scoreBacktestReport(makeReport({ completedCycles: 10 }));
+    expect(many).toBeGreaterThan(few);
+    // But the bonus is small (0.1 per cycle, capped at 20)
+    expect(many - few).toBeCloseTo(0.8, 1);
+  });
+
+  it("caps cycle bonus at 20 cycles", () => {
+    const at20 = scoreBacktestReport(makeReport({ completedCycles: 20 }));
+    const at100 = scoreBacktestReport(makeReport({ completedCycles: 100 }));
+    expect(at20).toBe(at100);
+  });
+
+  it("computes expected composite score", () => {
+    // totalReturnPercent=3 - max(0, 20-15)*0.5 + min(8,20)*0.1 = 3 - 2.5 + 0.8 = 1.3
+    const score = scoreBacktestReport(
+      makeReport({ totalReturnPercent: 3, maxDrawdownPercent: 20, completedCycles: 8 }),
+    );
+    expect(score).toBeCloseTo(1.3, 2);
+  });
+});
+
+// ─── searchBestParams ────────────────────────────────────────────────────────
+
+describe("searchBestParams", () => {
+  it("returns null for fewer than 10 ticks", () => {
+    const ticks = makeTicks([100, 101, 102]);
+    expect(searchBestParams(ticks, 10_000)).toBeNull();
+  });
+
+  it("falls back to suggestParams when enableParamSearch=false", () => {
+    const ticks = makeOscillatingTicks(2_100_000, 2_300_000, 500);
+    const config: AutopilotConfig = { ...AUTOPILOT_DEFAULTS, enableParamSearch: false };
+    const searchResult = searchBestParams(ticks, 100_000, config);
+    const directResult = suggestParams(ticks, 100_000, config);
+
+    // Both should produce the same config
+    if (searchResult && !("skipped" in searchResult) && directResult && !("skipped" in directResult)) {
+      expect(searchResult.config).toEqual(directResult.config);
+    }
+  });
+
+  it("returns a valid grid config for oscillating BTC_CZK market", () => {
+    const ticks = makeOscillatingTicks(1_400_000, 1_500_000, 500);
+    const result = searchBestParams(ticks, 100_000);
+
+    expect(result).not.toBeNull();
+    if (!result || "skipped" in result) {
+      throw new Error("Expected searchBestParams to return a config");
+    }
+    expect(result.config.pair).toBe("BTC_CZK");
+    expect(result.config.levels).toBeGreaterThanOrEqual(3);
+    expect(result.config.levels).toBeLessThanOrEqual(50);
+    expect(result.config.lowerPrice).toBeLessThan(result.config.upperPrice);
+  });
+
+  it("selects tighter grid than default single-config for narrow oscillation", () => {
+    // Narrow oscillation: ~3.3% total range
+    const ticks = makeOscillatingTicks(1_450_000, 1_500_000, 500);
+
+    // What the old single-config produces (default multipliers)
+    const singleResult = suggestParams(ticks, 100_000);
+
+    // What the search produces
+    const searchResult = searchBestParams(ticks, 100_000);
+
+    if (
+      singleResult && !("skipped" in singleResult) &&
+      searchResult && !("skipped" in searchResult)
+    ) {
+      const singleSpacing =
+        (singleResult.config.upperPrice - singleResult.config.lowerPrice) /
+        (singleResult.config.levels - 1);
+      const searchSpacing =
+        (searchResult.config.upperPrice - searchResult.config.lowerPrice) /
+        (searchResult.config.levels - 1);
+
+      // The search should find a grid that is at least as tight (or tighter)
+      // than the default single config. With completed-cycle filtering,
+      // it should prefer configs that actually trade.
+      expect(searchSpacing).toBeLessThanOrEqual(singleSpacing * 1.01); // allow 1% float tolerance
+    }
+  });
+
+  it("includes search metadata when returning from search", () => {
+    const ticks = makeOscillatingTicks(1_400_000, 1_500_000, 500);
+    const result = searchBestParams(ticks, 100_000);
+
+    if (result && !("skipped" in result) && "fromSearch" in result) {
+      expect(result.fromSearch).toBe(true);
+      expect(result.candidatesEvaluated).toBeGreaterThan(1);
+      expect(result.candidatesWithCycles).toBeGreaterThanOrEqual(1);
+      expect(typeof result.selectedScore).toBe("number");
+      // Adjustments should include search selection note
+      expect(result.metrics.adjustments.some((a: string) => a.includes("Selected by param search"))).toBe(true);
+    }
+  });
+
+  it("returns skip for strongly trending markets (all candidates share trend)", () => {
+    const prices = Array.from({ length: 500 }, (_, i) => 3_000_000 - i * 2_000);
+    const ticks = makeTicks(prices);
+    const result = searchBestParams(ticks, 100_000);
+
+    expect(result).not.toBeNull();
+    if (result) {
+      expect("skipped" in result).toBe(true);
+    }
+  });
+
+  it("returns null when budget is too low for any candidate", () => {
+    const ticks = makeOscillatingTicks(2_100_000, 2_300_000, 500);
+    // 50 CZK is too low for any BTC_CZK grid
+    const result = searchBestParams(ticks, 50);
+    expect(result).toBeNull();
+  });
+
+  it("selects candidate with completed cycles over one without", () => {
+    // Generate a market that oscillates enough for some configs to complete cycles
+    // but not others (wide grids will have 0 cycles)
+    const ticks = makeOscillatingTicks(1_430_000, 1_470_000, 1000, ONE_MIN);
+    const result = searchBestParams(ticks, 50_000);
+
+    if (result && !("skipped" in result) && "fromSearch" in result) {
+      // The search should have picked a candidate with cycles
+      expect(result.candidatesWithCycles).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("respects custom search ranges", () => {
+    const ticks = makeOscillatingTicks(1_400_000, 1_500_000, 500);
+    const narrowSearch: AutopilotConfig = {
+      ...AUTOPILOT_DEFAULTS,
+      paramSearchSpacingMultiplierRange: [1.0, 1.0] as [number, number],
+      paramSearchRangeMultiplierRange: [1.0, 1.0] as [number, number],
+    };
+    const result = searchBestParams(ticks, 100_000, narrowSearch);
+
+    // With only one candidate (1.0, 1.0), should still work
+    if (result && !("skipped" in result) && "fromSearch" in result) {
+      expect(result.candidatesEvaluated).toBe(1);
+    }
+  });
+
+  it("falls back to single config when no candidate has enough cycles", () => {
+    // Use a flat market where no grid config can complete cycles
+    const ticks = makeTicks(Array.from({ length: 500 }, () => 2_200_000));
+    const config: AutopilotConfig = {
+      ...AUTOPILOT_DEFAULTS,
+      paramSearchMinCompletedCycles: 5,
+    };
+    const result = searchBestParams(ticks, 100_000, config);
+
+    // Should fall back to the single-config suggestParams result (not null)
+    if (result && !("skipped" in result)) {
+      // Fallback result won't have fromSearch
+      expect("fromSearch" in result).toBe(false);
     }
   });
 });
