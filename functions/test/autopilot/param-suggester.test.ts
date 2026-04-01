@@ -9,7 +9,7 @@ import {
 } from "../../src/autopilot";
 import { calculateGridLevels } from "../../src/grid";
 import type { PriceTick, BacktestReport } from "../../src/backtest";
-import { AUTOPILOT_DEFAULTS, type AutopilotConfig, type GridConfig } from "../../src/config";
+import { AUTOPILOT_DEFAULTS, type AutopilotConfig } from "../../src/config";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
