@@ -456,10 +456,36 @@ export function searchBestParams(
   // Filter to candidates with enough completed cycles
   const viable = candidates.filter((c) => c.report.completedCycles >= minCycles);
 
-  if (viable.length > 0) {
-    // Sort by score descending, pick the best
-    viable.sort((a, b) => b.score - a.score);
-    const best = viable[0];
+  // Pick the best candidate: prefer those with cycles, otherwise pick tightest spacing
+  const pool = viable.length > 0 ? viable : candidates;
+
+  if (pool.length > 0) {
+    // Sort: if we have viable candidates with cycles, rank by score.
+    // If no candidate had cycles (fallback), rank by tightest spacing first
+    // (lowest desiredSpacingPercent), then by score as tiebreaker.
+    if (viable.length > 0) {
+      pool.sort((a, b) => b.score - a.score);
+    } else {
+      pool.sort((a, b) => {
+        const aSpacing = a.suggestion.metrics.desiredSpacingPercent;
+        const bSpacing = b.suggestion.metrics.desiredSpacingPercent;
+        if (Math.abs(aSpacing - bSpacing) > 0.01) return aSpacing - bSpacing;
+        return b.score - a.score;
+      });
+    }
+    const best = pool[0];
+
+    const selectionNote = viable.length > 0
+      ? `Selected by param search: score=${best.score.toFixed(2)}, ` +
+        `cycles=${best.report.completedCycles}, ` +
+        `return=${best.report.totalReturnPercent.toFixed(2)}%, ` +
+        `drawdown=${best.report.maxDrawdownPercent.toFixed(2)}%, ` +
+        `spacing=${best.spacingMultiplier}x, range=${best.rangeMultiplier}x ` +
+        `(${viable.length}/${candidates.length} candidates viable)`
+      : `Tightest-spacing fallback: score=${best.score.toFixed(2)}, ` +
+        `spacing=${best.suggestion.metrics.desiredSpacingPercent.toFixed(2)}%, ` +
+        `spacing=${best.spacingMultiplier}x, range=${best.rangeMultiplier}x ` +
+        `(0/${candidates.length} had cycles, picked tightest)`;
 
     const searchResult: SearchResult = {
       ...best.suggestion,
@@ -471,12 +497,7 @@ export function searchBestParams(
         ...best.suggestion.metrics,
         adjustments: [
           ...best.suggestion.metrics.adjustments,
-          `Selected by param search: score=${best.score.toFixed(2)}, ` +
-            `cycles=${best.report.completedCycles}, ` +
-            `return=${best.report.totalReturnPercent.toFixed(2)}%, ` +
-            `drawdown=${best.report.maxDrawdownPercent.toFixed(2)}%, ` +
-            `spacing=${best.spacingMultiplier}x, range=${best.rangeMultiplier}x ` +
-            `(${viable.length}/${candidates.length} candidates viable)`,
+          selectionNote,
         ],
       },
     };
@@ -484,8 +505,7 @@ export function searchBestParams(
     return searchResult;
   }
 
-  // No viable candidate with cycles — fall back to original single-config
-  // This ensures we don't regress: worst case we return what we would have before
+  // No candidates at all (all rejected by suggestParams) — fall back to single-config
   return suggestParams(ticks, availableQuote, autopilotConfig, entryBiasMode);
 }
 

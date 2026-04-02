@@ -597,12 +597,13 @@ describe("searchBestParams", () => {
 
   it("selects candidate with completed cycles over one without", () => {
     // Generate a market that oscillates enough for some configs to complete cycles
-    // but not others (wide grids will have 0 cycles)
-    const ticks = makeOscillatingTicks(1_430_000, 1_470_000, 1000, ONE_MIN);
+    // but not others (wide grids will have 0 cycles).
+    // 5.4% range over 1000 1-min ticks should allow tight grids to complete cycles.
+    const ticks = makeOscillatingTicks(1_410_000, 1_490_000, 1000, ONE_MIN);
     const result = searchBestParams(ticks, 50_000);
 
     if (result && !("skipped" in result) && "fromSearch" in result) {
-      // The search should have picked a candidate with cycles
+      // With enough oscillation, the search should find candidates with completed cycles
       expect(result.candidatesWithCycles).toBeGreaterThanOrEqual(1);
     }
   });
@@ -622,7 +623,7 @@ describe("searchBestParams", () => {
     }
   });
 
-  it("falls back to single config when no candidate has enough cycles", () => {
+  it("picks tightest spacing when no candidate has enough cycles", () => {
     // Use a flat market where no grid config can complete cycles
     const ticks = makeTicks(Array.from({ length: 500 }, () => 2_200_000));
     const config: AutopilotConfig = {
@@ -631,10 +632,16 @@ describe("searchBestParams", () => {
     };
     const result = searchBestParams(ticks, 100_000, config);
 
-    // Should fall back to the single-config suggestParams result (not null)
+    // Should return a search result with tightest spacing (not the default wide config)
     if (result && !("skipped" in result)) {
-      // Fallback result won't have fromSearch
-      expect("fromSearch" in result).toBe(false);
+      // When candidates exist but none have cycles, search picks tightest spacing
+      if ("fromSearch" in result) {
+        expect(result.fromSearch).toBe(true);
+        expect(result.candidatesWithCycles).toBe(0);
+        // Should have picked a tight spacing, not the default wide one
+        expect(result.metrics.desiredSpacingPercent).toBeLessThan(5);
+        expect(result.metrics.adjustments.some((a: string) => a.includes("Tightest-spacing fallback"))).toBe(true);
+      }
     }
   });
 });
