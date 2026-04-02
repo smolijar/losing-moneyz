@@ -314,7 +314,11 @@ export function suggestParams(
   const finalValidation = validateGridConfig(config, currentPrice);
   if (!finalValidation.valid) return null;
 
-  config = biasInitialEntryTowardMarket(config, currentPrice, entryBiasMode);
+  const biasedConfig = biasInitialEntryTowardMarket(config, currentPrice, entryBiasMode);
+
+  // Verify bias didn't push spacing below minimum (entry bias can shrink the range)
+  const biasedValidation = validateGridConfig(biasedConfig, currentPrice);
+  config = biasedValidation.valid ? biasedConfig : config;
 
   // Verify budget per level meets pair minimum
   const limits = getPairLimits(config.pair);
