@@ -299,8 +299,8 @@ export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
   replacementImprovementThreshold: 5,
   enableParamSearch: true,
   paramSearchMinCompletedCycles: 1,
-  paramSearchSpacingMultiplierRange: [1.0, 2.5] as [number, number],
-  paramSearchRangeMultiplierRange: [1.0, 3.0] as [number, number],
+  paramSearchSpacingMultiplierRange: [0.25, 2.5] as [number, number],
+  paramSearchRangeMultiplierRange: [0.5, 3.0] as [number, number],
   paramSearchSpacingStep: 0.25,
   paramSearchRangeStep: 0.5,
 };

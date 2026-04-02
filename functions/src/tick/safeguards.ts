@@ -22,7 +22,7 @@ export interface SafeguardConfig {
 
 export const DEFAULT_SAFEGUARD_CONFIG: SafeguardConfig = {
   maxDrawdownPercent: 10,
-  maxConsecutiveApiFailures: 3,
+  maxConsecutiveApiFailures: 8,
   staleTicThresholdMs: 10 * 60 * 1000, // 10 minutes
   maxIdleTimeMs: 3 * 24 * 60 * 60 * 1000, // 3 days
 };

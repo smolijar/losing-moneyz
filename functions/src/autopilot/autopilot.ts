@@ -236,6 +236,15 @@ export class Autopilot {
 
     const suggested = suggestion;
 
+    // Log search metadata when adaptive search was used
+    if ("fromSearch" in suggested && suggested.fromSearch) {
+      this.logger.info("Autopilot param search result", {
+        candidatesEvaluated: suggested.candidatesEvaluated,
+        candidatesWithCycles: suggested.candidatesWithCycles,
+        selectedScore: suggested.selectedScore,
+      });
+    }
+
     this.logger.info("Autopilot suggested config", {
       config: suggested.config,
       metrics: suggested.metrics,

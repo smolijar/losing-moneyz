@@ -182,19 +182,19 @@ describe("checkCircuitBreaker", () => {
   });
 
   it("returns ok under threshold", () => {
-    const result = checkCircuitBreaker(2);
+    const result = checkCircuitBreaker(7);
     expect(result.ok).toBe(true);
   });
 
   it("pauses at threshold", () => {
-    const result = checkCircuitBreaker(3);
+    const result = checkCircuitBreaker(8);
     expect(result.ok).toBe(false);
     expect(result.action).toBe("pause");
     expect(result.reason).toContain("consecutive API failures");
   });
 
   it("pauses above threshold", () => {
-    const result = checkCircuitBreaker(5);
+    const result = checkCircuitBreaker(10);
     expect(result.ok).toBe(false);
     expect(result.action).toBe("pause");
   });
@@ -299,13 +299,13 @@ describe("boundary value tests", () => {
   });
 
   it("checkCircuitBreaker: exactly 1 below threshold does not pause", () => {
-    const result = checkCircuitBreaker(2); // default max is 3
+    const result = checkCircuitBreaker(7); // default max is 8
     expect(result.ok).toBe(true);
     expect(result.action).toBe("continue");
   });
 
   it("checkCircuitBreaker: exactly at threshold pauses", () => {
-    const result = checkCircuitBreaker(3);
+    const result = checkCircuitBreaker(8);
     expect(result.ok).toBe(false);
     expect(result.action).toBe("pause");
   });
