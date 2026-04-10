@@ -321,6 +321,8 @@ export interface AutopilotState {
   lastReplacementAt?: Date;
   /** Percent capital increase seen during the last evaluation */
   lastCapitalIncreasePercent?: number;
+  /** When the autopilot last attempted a wallet rebalance sell */
+  lastRebalanceAt?: Date;
 }
 
 /** Schema for AutopilotState document data */
@@ -332,4 +334,5 @@ export const AutopilotStateDocSchema = z.object({
   lastSupervisorDecision: z.string().optional(),
   lastReplacementAt: FirestoreDate.optional(),
   lastCapitalIncreasePercent: z.number().optional(),
+  lastRebalanceAt: FirestoreDate.optional(),
 });

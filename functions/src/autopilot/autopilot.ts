@@ -10,6 +10,7 @@ import type { Repository } from "../storage";
 import { WalletManager } from "../storage";
 import { validateWithBacktest, type PriceTick } from "../backtest";
 import { searchBestParams, type SuggestResult, type SuggestSkip } from "./param-suggester";
+import { getBudgetPerLevel, validateGridConfig } from "../grid";
 import type { Logger } from "../tick";
 
 /** Result of an autopilot engagement attempt */
@@ -269,19 +270,73 @@ export class Autopilot {
       completedCycles: validation.report.completedCycles,
     });
 
-    // 8. Create experiment
+    // 8. Clamp levels to match actual CZK budget.
+    // suggestParams uses managedQuoteEquivalent (CZK + BTC value) to find the
+    // optimal grid shape, but the real buy budget is wallet.availableQuote.
+    const effectiveBudgetQuote = wallet.availableQuote;
+    const limits = getPairLimits(this.config.pair);
+    let adjustedConfig = { ...suggested.config, budgetQuote: effectiveBudgetQuote };
+
+    // Reduce levels until budgetPerLevel / upperPrice >= minOrderSize
+    while (adjustedConfig.levels > 3) {
+      const bpl = getBudgetPerLevel(adjustedConfig);
+      const minAmount = bpl / adjustedConfig.upperPrice;
+      if (minAmount >= limits.minOrderSize) break;
+      adjustedConfig = { ...adjustedConfig, levels: adjustedConfig.levels - 1 };
+    }
+
+    // Check if even 3 levels can't meet minimum order size
+    const finalBpl = getBudgetPerLevel(adjustedConfig);
+    const finalMinAmount = finalBpl / adjustedConfig.upperPrice;
+    if (finalMinAmount < limits.minOrderSize) {
+      // Try auto-rebalance: sell some BTC to get enough CZK
+      const rebalanceResult = await this.tryRebalanceWallet(
+        wallet, currentPrice, limits, adjustedConfig.upperPrice, ticks,
+      );
+      if (rebalanceResult) {
+        return rebalanceResult;
+      }
+      const minCzk = limits.minOrderSize * adjustedConfig.upperPrice * Math.ceil(3 / 2);
+      const reason =
+        `CZK budget too low for minimum order size: ${effectiveBudgetQuote.toFixed(0)} CZK, ` +
+        `need ~${minCzk.toFixed(0)} CZK for 3 levels`;
+      this.logger.warn(`Autopilot skipped: ${reason}`);
+      await this.saveState(null, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    // Validate the adjusted config
+    const adjustedValidation = validateGridConfig(adjustedConfig, currentPrice);
+    if (!adjustedValidation.valid) {
+      const reason = `Adjusted config invalid: ${adjustedValidation.errors.join("; ")}`;
+      this.logger.warn(`Autopilot skipped: ${reason}`);
+      await this.saveState(null, `skipped:${reason}`);
+      return { action: "skipped", reason };
+    }
+
+    if (adjustedConfig.levels !== suggested.config.levels) {
+      this.logger.info("Clamped grid levels for actual CZK budget", {
+        originalLevels: suggested.config.levels,
+        adjustedLevels: adjustedConfig.levels,
+        effectiveBudgetQuote,
+        managedQuoteEquivalent,
+        budgetPerLevel: getBudgetPerLevel(adjustedConfig),
+      });
+    }
+
+    // 9. Create experiment
     const experimentId = await this.repo.createExperiment({
       status: "active",
-      gridConfig: suggested.config,
-      allocatedQuote: suggested.config.budgetQuote,
+      gridConfig: adjustedConfig,
+      allocatedQuote: adjustedConfig.budgetQuote,
       allocatedBase: 0,
       consecutiveFailures: 0,
     });
 
-    // 9. Allocate wallet
+    // 10. Allocate wallet
     const allocation = await this.walletManager.allocateForExperiment(
       experimentId,
-      suggested.config,
+      adjustedConfig,
       {
         quoteDelta: wallet.availableQuote,
         baseDelta: wallet.availableBase,
@@ -296,35 +351,19 @@ export class Autopilot {
       });
       await this.repo.updateExperimentStatus(experimentId, "stopped");
       const reason = `Wallet allocation failed: ${allocation.reason}`;
-      await this.saveState(suggested.config, `skipped:${reason}`);
+      await this.saveState(adjustedConfig, `skipped:${reason}`);
       return { action: "skipped", reason };
     }
 
-    // 10. Reconcile budgetQuote to match actual CZK allocation.
-    // In mixed-wallet mode, suggestParams used managedQuoteEquivalent (CZK + BTC value)
-    // as budgetQuote, but allocateForExperiment sets allocatedQuote to just the CZK portion.
-    // Without this, budgetPerLevel is computed from the inflated budgetQuote, sizing orders
-    // too large for the actual CZK available, so fewer buy orders can be placed.
-    if (wallet.availableQuote < suggested.config.budgetQuote - 0.01) {
-      const reconciledConfig = { ...suggested.config, budgetQuote: wallet.availableQuote };
-      await this.repo.updateExperiment(experimentId, { gridConfig: reconciledConfig });
-      this.logger.info("Reconciled budgetQuote to match actual CZK allocation", {
-        experimentId,
-        originalBudgetQuote: suggested.config.budgetQuote,
-        reconciledBudgetQuote: wallet.availableQuote,
-        allocatedBase: wallet.availableBase,
-      });
-    }
-
-    await this.saveState(suggested.config, "created");
+    await this.saveState(adjustedConfig, "created");
 
     this.logger.info("Autopilot created experiment", {
       experimentId,
-      pair: suggested.config.pair,
-      lowerPrice: suggested.config.lowerPrice,
-      upperPrice: suggested.config.upperPrice,
-      levels: suggested.config.levels,
-      budgetQuote: suggested.config.budgetQuote,
+      pair: adjustedConfig.pair,
+      lowerPrice: adjustedConfig.lowerPrice,
+      upperPrice: adjustedConfig.upperPrice,
+      levels: adjustedConfig.levels,
+      budgetQuote: adjustedConfig.budgetQuote,
       dailyVolatility: (suggested.metrics.dailyVolatility * 100).toFixed(2) + "%",
     });
 
@@ -332,7 +371,7 @@ export class Autopilot {
       action: "created",
       reason: "Experiment created successfully",
       experimentId,
-      config: suggested.config,
+      config: adjustedConfig,
     };
   }
 
@@ -356,6 +395,112 @@ export class Autopilot {
     if (hasQuote) return "quote_only";
     if (hasBase) return "base_only";
     return "empty";
+  }
+
+  /**
+   * Attempt to sell some BTC to increase CZK balance when the CZK portion is
+   * too small to fund a viable grid, but total wallet value (CZK + BTC) is
+   * sufficient.
+   *
+   * Places a limit sell at the current bid price for near-immediate fill.
+   * Returns an AutopilotResult to short-circuit engage() if a rebalance sell
+   * was placed (the next tick will see the new CZK and create a grid).
+   */
+  private async tryRebalanceWallet(
+    wallet: { availableQuote: number; availableBase: number },
+    currentPrice: number,
+    limits: { minOrderSize: number; basePrecision: number },
+    upperPrice: number,
+    ticks: PriceTick[],
+  ): Promise<AutopilotResult | null> {
+    // Check total value is sufficient for a grid
+    const managedQuoteEquivalent =
+      wallet.availableQuote + wallet.availableBase * currentPrice * (1 - COINMATE_FEES.maker);
+    if (managedQuoteEquivalent < this.config.minBudgetQuote) {
+      return null; // total value too low, can't help
+    }
+
+    // Check rebalance cooldown (10 minutes)
+    const autopilotState = await this.repo.getAutopilotState();
+    if (autopilotState?.lastRebalanceAt) {
+      const elapsed = Date.now() - autopilotState.lastRebalanceAt.getTime();
+      const cooldownMs = 10 * 60 * 1000; // 10 minutes
+      if (elapsed < cooldownMs) {
+        const remainingMin = ((cooldownMs - elapsed) / 60000).toFixed(1);
+        this.logger.info(`Rebalance cooldown: ${remainingMin} min remaining`);
+        return null;
+      }
+    }
+
+    // Compute how much CZK we need: enough for 3 levels at minimum order size
+    const minCzkNeeded = limits.minOrderSize * upperPrice * Math.ceil(3 / 2);
+    const shortfall = minCzkNeeded - wallet.availableQuote;
+    if (shortfall <= 0) {
+      return null; // shouldn't happen if we got here, but guard
+    }
+
+    // Sell enough BTC to cover shortfall + 5% buffer for fees/slippage
+    let sellAmountBtc = (shortfall / currentPrice) * 1.05;
+
+    // Cap at 50% of available base to prevent over-selling
+    const maxSell = wallet.availableBase * 0.5;
+    sellAmountBtc = Math.min(sellAmountBtc, maxSell);
+
+    // Round down to pair precision
+    const factor = Math.pow(10, limits.basePrecision);
+    sellAmountBtc = Math.floor(sellAmountBtc * factor) / factor;
+
+    // Must meet minimum order size
+    if (sellAmountBtc < limits.minOrderSize) {
+      this.logger.info("Rebalance sell too small for minimum order size", {
+        sellAmountBtc,
+        minOrderSize: limits.minOrderSize,
+        availableBase: wallet.availableBase,
+      });
+      return null;
+    }
+
+    // Use the last trade price as the sell price — limit sell at market
+    const sellPrice = ticks[ticks.length - 1].price;
+
+    try {
+      const response = await this.client.sellLimit(
+        this.config.pair,
+        sellAmountBtc,
+        sellPrice,
+      );
+      const orderId = Number(response.data);
+
+      this.logger.info("Rebalance sell placed", {
+        orderId,
+        sellAmountBtc,
+        sellPrice,
+        expectedCzk: sellAmountBtc * sellPrice,
+        shortfall,
+        availableBase: wallet.availableBase,
+      });
+
+      await this.repo.updateAutopilotState({
+        lastRebalanceAt: new Date(),
+        lastReason: `rebalancing: sold ${sellAmountBtc} BTC at ${sellPrice} to fund grid`,
+        lastSupervisorDecision: "rebalance_sell",
+      });
+
+      return {
+        action: "skipped",
+        reason:
+          `Rebalancing wallet: selling ${sellAmountBtc} BTC at ${sellPrice} CZK ` +
+          `to fund grid (need ~${minCzkNeeded.toFixed(0)} CZK, have ${wallet.availableQuote.toFixed(0)} CZK)`,
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error("Rebalance sell failed", {
+        error: errMsg,
+        sellAmountBtc,
+        sellPrice,
+      });
+      return null; // fall through to normal skip
+    }
   }
 
   private async saveState(

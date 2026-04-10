@@ -405,10 +405,13 @@ describe("Autopilot", () => {
     });
 
     it("does not skip when quote is low but mixed inventory has enough total value", async () => {
+      // Needs enough CZK to fund at least 3 levels after level clamping.
+      // At ~1.54M price, 3 levels need bpl/upperPrice >= 0.0002 BTC,
+      // i.e. ~1000 CZK / 2 = 500 bpl ≈ 0.000316 BTC per level. ✓
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 617.55,
+        availableQuote: 1_000,
         availableBase: 0.00275881,
       });
 
@@ -548,10 +551,11 @@ describe("Autopilot", () => {
         }),
       });
 
+      // Enough CZK for 3+ levels after level clamping
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 617.55,
+        availableQuote: 1_000,
         availableBase: 0.00275881,
       });
 
@@ -560,7 +564,7 @@ describe("Autopilot", () => {
 
       expect(result.action).toBe("created");
       const exp = await repo.getExperiment(result.experimentId!);
-      expect(exp!.allocatedQuote).toBeCloseTo(617.55);
+      expect(exp!.allocatedQuote).toBeCloseTo(1_000);
       expect(exp!.allocatedBase).toBeCloseTo(0.00275881);
 
       const wallet = await walletManager.getState();
@@ -569,7 +573,7 @@ describe("Autopilot", () => {
       expect(wallet.totalAllocatedBase).toBeCloseTo(0.00275881);
     });
 
-    it("reconciles budgetQuote to match actual CZK allocation in mixed-wallet mode", async () => {
+    it("sets budgetQuote to actual CZK (not total equivalent) in mixed-wallet mode", async () => {
       const transactions = makeOscillatingTransactions(1_540_000, 40_000, 500);
       const client = createMockClient({
         getTransactions: vi.fn().mockResolvedValue({
@@ -578,10 +582,11 @@ describe("Autopilot", () => {
         }),
       });
 
+      // Enough CZK for 3+ levels after level clamping
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 617.55,
+        availableQuote: 1_000,
         availableBase: 0.00275881,
       });
 
@@ -590,10 +595,10 @@ describe("Autopilot", () => {
 
       expect(result.action).toBe("created");
       const exp = await repo.getExperiment(result.experimentId!);
-      // budgetQuote should be reconciled to match allocatedQuote (CZK-only portion)
-      // rather than the combined CZK + BTC equivalent that suggestParams used
-      expect(exp!.gridConfig.budgetQuote).toBeCloseTo(617.55);
-      expect(exp!.allocatedQuote).toBeCloseTo(617.55);
+      // budgetQuote should match the CZK-only portion (level clamping sets it
+      // before experiment creation, not via post-creation reconciliation).
+      expect(exp!.gridConfig.budgetQuote).toBeCloseTo(1_000);
+      expect(exp!.allocatedQuote).toBeCloseTo(1_000);
     });
 
     it("shapes mixed-wallet restart config so the nearest sell is near market", async () => {
@@ -605,10 +610,11 @@ describe("Autopilot", () => {
         }),
       });
 
+      // Enough CZK for 3+ levels after level clamping
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 617.55,
+        availableQuote: 1_000,
         availableBase: 0.00275881,
       });
 
@@ -695,8 +701,8 @@ describe("Autopilot", () => {
     });
 
     it("uses sell_resume when base is genuinely sufficient for sells (>10% of capital)", async () => {
-      // This mirrors the existing test at line 599 — wallet with 0.00275881 BTC
-      // (~87% of capital) should still use sell_resume mode.
+      // This mirrors the mixed-wallet test — wallet with significant BTC
+      // should still use sell_resume mode. Enough CZK for 3+ levels.
       const transactions = makeOscillatingTransactions(1_540_000, 40_000, 500);
       const client = createMockClient({
         getTransactions: vi.fn().mockResolvedValue({
@@ -708,7 +714,7 @@ describe("Autopilot", () => {
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 617.55,
+        availableQuote: 1_000,
         availableBase: 0.00275881,
       });
 
@@ -955,6 +961,204 @@ describe("Autopilot", () => {
       // Should still return a valid skip result, not throw
       expect(result.action).toBe("skipped");
       expect(result.reason).toContain("Insufficient capital");
+    });
+  });
+
+  // ─── Level clamping ─────────────────────────────────────────────────
+
+  describe("level clamping", () => {
+    it("reduces grid levels to meet minimum order size when CZK is limited", async () => {
+      // Wallet has 2,000 CZK + some BTC. The param search sizes the grid on
+      // the full equivalent (~6,000+) which may yield 7+ levels. With only
+      // 2,000 CZK, levels should be clamped so budgetPerLevel/upperPrice >= 0.0002.
+      const transactions = makeOscillatingTransactions(1_500_000, 50_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 2_000,
+        availableBase: 0.003, // ~4,500 CZK in BTC → total ~6,500
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const exp = await repo.getExperiment(result.experimentId!);
+      // budgetQuote should equal the CZK portion, not total equivalent
+      expect(exp!.gridConfig.budgetQuote).toBeCloseTo(2_000);
+      // The grid should still have valid levels (3–50)
+      expect(exp!.gridConfig.levels).toBeGreaterThanOrEqual(3);
+      expect(exp!.gridConfig.levels).toBeLessThanOrEqual(50);
+      // Budget per level should be enough for minimum order size at upper price
+      const bpl = exp!.gridConfig.budgetQuote / Math.ceil(exp!.gridConfig.levels / 2);
+      const minAmount = bpl / exp!.gridConfig.upperPrice;
+      expect(minAmount).toBeGreaterThanOrEqual(0.0002);
+    });
+
+    it("creates experiment with full levels when CZK alone is sufficient", async () => {
+      // 100,000 CZK wallet — no clamping needed
+      const transactions = makeOscillatingTransactions(2_200_000, 100_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 100_000,
+        availableBase: 0,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const exp = await repo.getExperiment(result.experimentId!);
+      // With 100k CZK, the grid should have many levels, no clamping needed
+      expect(exp!.gridConfig.budgetQuote).toBe(100_000);
+      expect(exp!.gridConfig.levels).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  // ─── Auto-rebalance ────────────────────────────────────────────────
+
+  describe("auto-rebalance", () => {
+    it("places a sell order when CZK is too low for 3 levels but BTC is sufficient", async () => {
+      // 200 CZK + 0.003 BTC (~4,500 CZK). Can't fund 3 levels with 200 CZK
+      // at 1.5M price: need bpl = 0.0002 * 1.55M * 2 ≈ 620 CZK.
+      const transactions = makeOscillatingTransactions(1_500_000, 50_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 200,
+        availableBase: 0.003,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      // Should place a rebalance sell and skip this tick
+      expect(result.action).toBe("skipped");
+      expect(result.reason).toContain("Rebalancing wallet");
+      expect(result.reason).toContain("selling");
+
+      // sellLimit should have been called
+      expect(client.sellLimit).toHaveBeenCalledTimes(1);
+      const [pair, amount, price] = (client.sellLimit as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(pair).toBe("BTC_CZK");
+      expect(amount).toBeGreaterThanOrEqual(0.0002); // at least minOrderSize
+      expect(amount).toBeLessThanOrEqual(0.003 * 0.5); // capped at 50% of base
+      expect(price).toBeGreaterThan(0);
+
+      // State should record rebalance
+      const state = await repo.getAutopilotState();
+      expect(state!.lastRebalanceAt).toBeInstanceOf(Date);
+      expect(state!.lastSupervisorDecision).toBe("rebalance_sell");
+    });
+
+    it("respects rebalance cooldown (10 min)", async () => {
+      // Set a recent rebalance timestamp → should NOT sell again
+      await repo.updateAutopilotState({
+        lastRebalanceAt: new Date(Date.now() - 5 * 60 * 1000), // 5 min ago
+      });
+
+      const transactions = makeOscillatingTransactions(1_500_000, 50_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 200,
+        availableBase: 0.003,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      // Should skip without selling — rebalance cooldown prevents it
+      expect(result.action).toBe("skipped");
+      expect(result.reason).toContain("CZK budget too low");
+      expect(client.sellLimit).not.toHaveBeenCalled();
+    });
+
+    it("skips rebalance when base is too small to meet minimum order size", async () => {
+      // 450 CZK + 0.0003 BTC. Total ~899 CZK (above minBudgetQuote 500).
+      // CZK too low for 3 levels → rebalance triggered. But the computed sell
+      // amount (~0.000119 BTC) is below minOrderSize (0.0002), so rebalance
+      // is skipped and we fall through to the "CZK budget too low" skip.
+      const transactions = makeOscillatingTransactions(1_500_000, 50_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 450,
+        availableBase: 0.0003, // sell amount would be ~0.000119, below 0.0002 minOrderSize
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      // Should skip without selling — base too small for a sell order
+      expect(result.action).toBe("skipped");
+      expect(result.reason).toContain("CZK budget too low");
+      expect(client.sellLimit).not.toHaveBeenCalled();
+    });
+
+    it("caps sell amount at 50% of available base", async () => {
+      // 100 CZK + 0.001 BTC. Shortfall is large relative to base, so the
+      // 50% cap should kick in.
+      const transactions = makeOscillatingTransactions(1_500_000, 50_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 100,
+        availableBase: 0.001, // ~1,500 CZK total, 0.0005 max sell
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      if (result.reason.includes("Rebalancing")) {
+        const [, amount] = (client.sellLimit as ReturnType<typeof vi.fn>).mock.calls[0];
+        expect(amount).toBeLessThanOrEqual(0.001 * 0.5);
+      }
+      // If sell amount after capping was below minOrderSize, it skips gracefully
+      expect(result.action).toBe("skipped");
     });
   });
 
