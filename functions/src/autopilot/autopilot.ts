@@ -442,6 +442,11 @@ export class Autopilot {
     // Sell enough BTC to cover shortfall + 5% buffer for fees/slippage
     let sellAmountBtc = (shortfall / currentPrice) * 1.05;
 
+    // Bump up to minOrderSize if the shortfall is tiny but we have enough base
+    if (sellAmountBtc < limits.minOrderSize) {
+      sellAmountBtc = limits.minOrderSize;
+    }
+
     // Cap at 50% of available base to prevent over-selling
     const maxSell = wallet.availableBase * 0.5;
     sellAmountBtc = Math.min(sellAmountBtc, maxSell);
@@ -450,7 +455,7 @@ export class Autopilot {
     const factor = Math.pow(10, limits.basePrecision);
     sellAmountBtc = Math.floor(sellAmountBtc * factor) / factor;
 
-    // Must meet minimum order size
+    // Must meet minimum order size (may fail after 50% cap + rounding)
     if (sellAmountBtc < limits.minOrderSize) {
       this.logger.info("Rebalance sell too small for minimum order size", {
         sellAmountBtc,
