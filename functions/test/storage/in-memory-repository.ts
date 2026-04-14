@@ -69,6 +69,12 @@ export class InMemoryRepository implements Repository {
     Object.assign(exp, data, { updatedAt: new Date() });
   }
 
+  async deleteExperiment(experimentId: string): Promise<void> {
+    this.experiments.delete(experimentId);
+    this.orders.delete(experimentId);
+    this.snapshots.delete(experimentId);
+  }
+
   // ─── Orders ───────────────────────────────────────────────────────────
 
   async getOrders(experimentId: string): Promise<OrderRecord[]> {

@@ -33,6 +33,9 @@ export interface Repository {
   /** Update arbitrary fields on an experiment. */
   updateExperiment(experimentId: string, data: Partial<Experiment>): Promise<void>;
 
+  /** Delete an experiment and its subcollections (orders, snapshots). */
+  deleteExperiment(experimentId: string): Promise<void>;
+
   // ─── Orders ───────────────────────────────────────────────────────────
 
   /** Get all orders for an experiment. */

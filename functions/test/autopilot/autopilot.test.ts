@@ -332,9 +332,45 @@ describe("Autopilot", () => {
 
       await autopilot.engage();
 
-      // The paused experiment should have had its wallet released
+      // The paused experiment should have been deleted after wallet release
       const exp = await repo.getExperiment(expId);
-      expect(exp!.allocatedQuote).toBe(0);
+      expect(exp).toBeUndefined();
+    });
+
+    it("deletes paused experiments with zero allocation", async () => {
+      const expId = await repo.createExperiment({
+        status: "paused",
+        gridConfig: {
+          pair: "BTC_CZK",
+          lowerPrice: 2_000_000,
+          upperPrice: 2_400_000,
+          levels: 5,
+          budgetQuote: 50_000,
+        },
+        allocatedQuote: 0,
+        allocatedBase: 0,
+        consecutiveFailures: 0,
+      });
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 100_000,
+        availableBase: 0,
+      });
+
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: makeOscillatingTransactions(2_200_000, 100_000, 500),
+        }),
+      });
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+
+      await autopilot.engage();
+
+      // Experiment should be deleted from the repository
+      const exp = await repo.getExperiment(expId);
+      expect(exp).toBeUndefined();
     });
 
     it("promotes paused experiments with open orders to stopped", async () => {
@@ -513,6 +549,33 @@ describe("Autopilot", () => {
       expect(exp).toBeDefined();
       expect(exp!.status).toBe("active");
       expect(exp!.gridConfig.pair).toBe("BTC_CZK");
+    });
+
+    it("sets lastReplacementAt on new experiment to protect 6h regrid cooldown", async () => {
+      const transactions = makeOscillatingTransactions(2_200_000, 100_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 100_000,
+        availableBase: 0,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const before = new Date();
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+
+      const state = await repo.getAutopilotState();
+      expect(state!.lastReplacementAt).toBeInstanceOf(Date);
+      expect(state!.lastReplacementAt!.getTime()).toBeGreaterThanOrEqual(before.getTime());
     });
 
     it("allocates wallet capital for the new experiment", async () => {
@@ -1159,6 +1222,35 @@ describe("Autopilot", () => {
       }
       // If sell amount after capping was below minOrderSize, it skips gracefully
       expect(result.action).toBe("skipped");
+    });
+
+    it("deducts sold BTC from wallet availableBase after rebalance sell", async () => {
+      // 200 CZK + 0.003 BTC — same as the basic rebalance test
+      const transactions = makeOscillatingTransactions(1_500_000, 50_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 200,
+        availableBase: 0.003,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("skipped");
+      expect(result.reason).toContain("Rebalancing wallet");
+
+      // The sell amount should have been deducted from wallet.availableBase
+      const [, sellAmount] = (client.sellLimit as ReturnType<typeof vi.fn>).mock.calls[0];
+      const wallet = await walletManager.getState();
+      expect(wallet.availableBase).toBeCloseTo(0.003 - sellAmount, 8);
     });
   });
 

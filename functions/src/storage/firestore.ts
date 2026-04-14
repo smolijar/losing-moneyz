@@ -76,6 +76,21 @@ export class FirestoreRepository implements Repository {
     });
   }
 
+  async deleteExperiment(experimentId: string): Promise<void> {
+    // Delete subcollections first (Firestore doesn't cascade deletes)
+    const batchSize = 100;
+    for (const subCol of [this.ordersCol(experimentId), this.snapshotsCol(experimentId)]) {
+      let snap = await subCol.limit(batchSize).get();
+      while (!snap.empty) {
+        const batch = this.db.batch();
+        snap.docs.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+        snap = await subCol.limit(batchSize).get();
+      }
+    }
+    await this.experimentsCol().doc(experimentId).delete();
+  }
+
   // ─── Orders ───────────────────────────────────────────────────────────
 
   async getOrders(experimentId: string): Promise<OrderRecord[]> {

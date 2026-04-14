@@ -108,18 +108,12 @@ export class Autopilot {
         });
         await this.walletManager.releaseForExperiment(exp.id);
       }
-    }
 
-    // 3b. Double-check that no paused experiments still have open orders after cleanup.
-    for (const exp of paused) {
-      const openOrders = await this.repo.getOrdersByStatus(exp.id, "open");
-      if (openOrders.length > 0) {
-        this.logger.info("Autopilot waiting: paused experiments still have open orders", {
-          experimentId: exp.id,
-          openOrders: openOrders.length,
-        });
-        return { action: "skipped", reason: "paused experiments pending order cleanup" };
-      }
+      // Delete fully-cleaned paused experiments to prevent accumulation
+      this.logger.info("Autopilot deleting cleaned-up paused experiment", {
+        experimentId: exp.id,
+      });
+      await this.repo.deleteExperiment(exp.id);
     }
 
     // 4. Pull wallet capital
@@ -357,6 +351,10 @@ export class Autopilot {
 
     await this.saveState(adjustedConfig, "created");
 
+    // Set lastReplacementAt so the 6h regrid cooldown protects new
+    // experiments from premature capital-increase replacement.
+    await this.repo.updateAutopilotState({ lastReplacementAt: new Date() });
+
     this.logger.info("Autopilot created experiment", {
       experimentId,
       pair: adjustedConfig.pair,
@@ -483,6 +481,13 @@ export class Autopilot {
         expectedCzk: sellAmountBtc * sellPrice,
         shortfall,
         availableBase: wallet.availableBase,
+      });
+
+      // Deduct the sold BTC from wallet immediately so that when the sell
+      // fills and syncWallet() runs, the CZK increase is offset by the
+      // expected BTC decrease — preventing a false "capital increase" trigger.
+      await this.repo.updateWalletState({
+        availableBase: wallet.availableBase - sellAmountBtc,
       });
 
       await this.repo.updateAutopilotState({

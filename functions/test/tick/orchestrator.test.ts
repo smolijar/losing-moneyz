@@ -1696,11 +1696,12 @@ describe("GridTickOrchestrator", () => {
       const walletManager = new WalletManager(repo);
       const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
         walletManager,
+        autopilotConfig: false,
       });
 
       await orchestrator.executeTick();
 
-      // Experiment should be paused
+      // Experiment should be paused (not deleted, since autopilot is disabled)
       const exp = await repo.getExperiment(id);
       expect(exp!.status).toBe("paused");
 

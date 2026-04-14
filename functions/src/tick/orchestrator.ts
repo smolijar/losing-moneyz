@@ -644,6 +644,7 @@ export class GridTickOrchestrator {
         this.logger.error("Coinmate API error during tick", {
           experimentId: experiment.id,
           statusCode: err.statusCode,
+          apiError: err.apiErrorMessage,
           message: errMsg,
         });
         this.alertSink.emit({
