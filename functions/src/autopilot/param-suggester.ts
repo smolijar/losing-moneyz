@@ -513,7 +513,7 @@ export function searchBestParams(
   return suggestParams(ticks, availableQuote, autopilotConfig, entryBiasMode);
 }
 
-function biasInitialEntryTowardMarket(
+export function biasInitialEntryTowardMarket(
   config: GridConfig,
   currentPrice: number,
   mode: EntryBiasMode,

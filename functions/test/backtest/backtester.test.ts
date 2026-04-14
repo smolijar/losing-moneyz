@@ -351,6 +351,53 @@ describe("validateWithBacktest", () => {
     expect(result.approved).toBe(false);
     expect(result.report.totalTrades).toBe(0);
   });
+
+  it("rejects when completedCycles is below minCompletedCycles", () => {
+    // Fix #4: small budgets can require at least 1 completed cycle.
+    // A flat market produces 0 cycles — should be rejected.
+    const ticks = generateFlatTicks(2_200_000, 500);
+    const result = validateWithBacktest(defaultConfig, ticks, {
+      minCompletedCycles: 1,
+      minReturnPercent: -100, // lenient on return
+      maxDrawdownPercent: 100, // lenient on drawdown
+    });
+
+    expect(result.approved).toBe(false);
+    expect(result.reasons.some((r) => r.includes("Completed cycles"))).toBe(true);
+    expect(result.report.completedCycles).toBe(0);
+  });
+
+  it("approves when completedCycles meets minCompletedCycles", () => {
+    // Oscillating market should produce at least 1 cycle
+    const config: GridConfig = {
+      pair: "BTC_CZK",
+      lowerPrice: 2_000_000,
+      upperPrice: 2_400_000,
+      levels: 5,
+      budgetQuote: 200_000,
+    };
+    const ticks = generateOscillatingTicks(2_000_000, 2_400_000, 10, 200);
+    const result = validateWithBacktest(config, ticks, {
+      minCompletedCycles: 1,
+      minReturnPercent: -100,
+      maxDrawdownPercent: 100,
+    });
+
+    expect(result.report.completedCycles).toBeGreaterThanOrEqual(1);
+    // The "Completed cycles" rejection string should NOT appear
+    expect(result.reasons.some((r) => r.includes("Completed cycles"))).toBe(false);
+  });
+
+  it("does not reject for zero cycles when minCompletedCycles defaults to 0", () => {
+    // Without specifying minCompletedCycles, zero cycles should NOT be a rejection reason
+    const ticks = generateFlatTicks(2_200_000, 500);
+    const result = validateWithBacktest(defaultConfig, ticks, {
+      minReturnPercent: -100,
+      maxDrawdownPercent: 100,
+    });
+
+    expect(result.reasons.some((r) => r.includes("Completed cycles"))).toBe(false);
+  });
 });
 
 // ─── formatBacktestReport ─────────────────────────────────────────────────────

@@ -240,6 +240,8 @@ export interface AutopilotConfig {
   backtestMaxDrawdownPercent: number;
   /** Minimum minutes between experiment replacements (prevents churn) */
   cooldownMinutes: number;
+  /** Maximum cooldown minutes after exponential backoff from consecutive recycles */
+  cooldownMaxMinutes: number;
   /** Minimum viable budget in quote currency (below this, skip) */
   minBudgetQuote: number;
   /** Enable automatic recycling of stale experiments */
@@ -287,6 +289,7 @@ export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
   backtestMaxDrawdownPercent: 30, // with correct accounting drawdown is realistic;
   // live safeguards (10%) still protect real capital
   cooldownMinutes: 10,
+  cooldownMaxMinutes: 480, // 8 hours max backoff
   minBudgetQuote: 500,
   enableStallAutofix: true,
   stalledEntryMinutes: 480,
@@ -323,6 +326,8 @@ export interface AutopilotState {
   lastCapitalIncreasePercent?: number;
   /** When the autopilot last attempted a wallet rebalance sell */
   lastRebalanceAt?: Date;
+  /** Number of consecutive recycles without a fill (for exponential cooldown) */
+  consecutiveRecycles: number;
 }
 
 /** Schema for AutopilotState document data */
@@ -335,4 +340,5 @@ export const AutopilotStateDocSchema = z.object({
   lastReplacementAt: FirestoreDate.optional(),
   lastCapitalIncreasePercent: z.number().optional(),
   lastRebalanceAt: FirestoreDate.optional(),
+  consecutiveRecycles: z.number().default(0),
 });

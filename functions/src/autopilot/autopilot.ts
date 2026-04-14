@@ -9,7 +9,7 @@ import type { ExchangeClient } from "../coinmate";
 import type { Repository } from "../storage";
 import { WalletManager } from "../storage";
 import { validateWithBacktest, type PriceTick } from "../backtest";
-import { searchBestParams, type SuggestResult, type SuggestSkip } from "./param-suggester";
+import { searchBestParams, biasInitialEntryTowardMarket, type SuggestResult, type SuggestSkip } from "./param-suggester";
 import { getBudgetPerLevel, validateGridConfig } from "../grid";
 import type { Logger } from "../tick";
 
@@ -64,13 +64,18 @@ export class Autopilot {
       return { action: "skipped", reason: "disabled" };
     }
 
-    // 1. Check cooldown
+    // 1. Check cooldown (exponential backoff on consecutive recycles)
     if (autopilotState?.lastActionAt) {
       const elapsed = Date.now() - autopilotState.lastActionAt.getTime();
-      const cooldownMs = this.config.cooldownMinutes * 60 * 1000;
+      const recycles = autopilotState.consecutiveRecycles ?? 0;
+      const backoffMinutes = Math.min(
+        this.config.cooldownMinutes * Math.pow(2, recycles),
+        this.config.cooldownMaxMinutes,
+      );
+      const cooldownMs = backoffMinutes * 60 * 1000;
       if (elapsed < cooldownMs) {
         const remainingMin = ((cooldownMs - elapsed) / 60000).toFixed(1);
-        this.logger.info(`Autopilot cooldown: ${remainingMin} min remaining`);
+        this.logger.info(`Autopilot cooldown: ${remainingMin} min remaining (recycle #${recycles})`);
         return { action: "skipped", reason: `cooldown (${remainingMin} min remaining)` };
       }
     }
@@ -245,10 +250,17 @@ export class Autopilot {
       metrics: suggested.metrics,
     });
 
-    // 7. Validate via backtest
+    // 7. Validate via backtest.
+    // For small budgets (where grid geometry is tight), require at least 1
+    // completed cycle to prove the grid can actually trade. For larger budgets,
+    // allow zero-cycle results since trending markets may not oscillate enough
+    // in the lookback window.
+    const SMALL_BUDGET_THRESHOLD = 5000; // CZK
+    const requireCycles = wallet.availableQuote < SMALL_BUDGET_THRESHOLD ? 1 : 0;
     const validation = validateWithBacktest(suggested.config, ticks, {
       minReturnPercent: this.config.backtestMinReturnPercent,
       maxDrawdownPercent: this.config.backtestMaxDrawdownPercent,
+      minCompletedCycles: requireCycles,
     });
 
     if (!validation.approved) {
@@ -277,6 +289,13 @@ export class Autopilot {
       const minAmount = bpl / adjustedConfig.upperPrice;
       if (minAmount >= limits.minOrderSize) break;
       adjustedConfig = { ...adjustedConfig, levels: adjustedConfig.levels - 1 };
+    }
+
+    // Re-apply market bias after level reduction.
+    // The initial bias targeted the original level count; with fewer levels the
+    // even re-spacing may push the nearest order far from market price.
+    if (adjustedConfig.levels !== suggested.config.levels) {
+      adjustedConfig = biasInitialEntryTowardMarket(adjustedConfig, currentPrice, entryBiasMode);
     }
 
     // Check if even 3 levels can't meet minimum order size
@@ -351,9 +370,13 @@ export class Autopilot {
 
     await this.saveState(adjustedConfig, "created");
 
-    // Set lastReplacementAt so the 6h regrid cooldown protects new
-    // experiments from premature capital-increase replacement.
-    await this.repo.updateAutopilotState({ lastReplacementAt: new Date() });
+    // Increment consecutive recycle counter. It will be reset to 0 when the
+    // orchestrator detects a fill (proving the grid is working).
+    const prevRecycles = autopilotState?.consecutiveRecycles ?? 0;
+    await this.repo.updateAutopilotState({
+      lastReplacementAt: new Date(),
+      consecutiveRecycles: prevRecycles + 1,
+    });
 
     this.logger.info("Autopilot created experiment", {
       experimentId,

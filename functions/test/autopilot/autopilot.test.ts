@@ -5,6 +5,7 @@ import type { ExchangeClient } from "../../src/coinmate";
 import { WalletManager } from "../../src/storage";
 import type { Logger } from "../../src/tick";
 import type { AutopilotConfig, GridConfig, WalletState } from "../../src/config";
+import { calculateGridLevels } from "../../src/grid";
 
 // Mock validateWithBacktest so we can control the backtest gate independently
 // of the actual price data. The autopilot tests focus on orchestration logic.
@@ -687,11 +688,7 @@ describe("Autopilot", () => {
       expect(result.action).toBe("created");
       const currentPrice = transactions[transactions.length - 1].price;
       const exp = await repo.getExperiment(result.experimentId!);
-      const levels = [
-        exp!.gridConfig.lowerPrice,
-        (exp!.gridConfig.lowerPrice + exp!.gridConfig.upperPrice) / 2,
-        exp!.gridConfig.upperPrice,
-      ];
+      const levels = calculateGridLevels(exp!.gridConfig).map((l) => l.price);
       const nearestSell = levels.filter((price) => price > currentPrice).sort((a, b) => a - b)[0];
       const gapPercent = ((nearestSell - currentPrice) / currentPrice) * 100;
       expect(gapPercent).toBeLessThanOrEqual(0.8);
@@ -789,11 +786,7 @@ describe("Autopilot", () => {
       const exp = await repo.getExperiment(result.experimentId!);
 
       // With sell_resume, the nearest sell should be near market (within 0.8%).
-      const levels = [
-        exp!.gridConfig.lowerPrice,
-        (exp!.gridConfig.lowerPrice + exp!.gridConfig.upperPrice) / 2,
-        exp!.gridConfig.upperPrice,
-      ];
+      const levels = calculateGridLevels(exp!.gridConfig).map((l) => l.price);
       const nearestSell = levels.filter((price) => price > currentPrice).sort((a, b) => a - b)[0];
       const gapPercent = ((nearestSell - currentPrice) / currentPrice) * 100;
       expect(gapPercent).toBeLessThanOrEqual(0.8);
@@ -830,12 +823,8 @@ describe("Autopilot", () => {
       const currentPrice = transactions[transactions.length - 1].price;
       const exp = await repo.getExperiment(result.experimentId!);
 
-      // Should use buy_bootstrap (nearest BUY within ~1% of market)
-      const levels = [
-        exp!.gridConfig.lowerPrice,
-        (exp!.gridConfig.lowerPrice + exp!.gridConfig.upperPrice) / 2,
-        exp!.gridConfig.upperPrice,
-      ];
+      // Should use buy_bootstrap (nearest BUY within ~1.5% of market)
+      const levels = calculateGridLevels(exp!.gridConfig).map((l) => l.price);
       const nearestBuy = levels.filter((price) => price < currentPrice).sort((a, b) => b - a)[0];
       const buyGapPercent = ((currentPrice - nearestBuy) / currentPrice) * 100;
       expect(buyGapPercent).toBeLessThanOrEqual(1.5);
@@ -1090,6 +1079,152 @@ describe("Autopilot", () => {
       // With 100k CZK, the grid should have many levels, no clamping needed
       expect(exp!.gridConfig.budgetQuote).toBe(100_000);
       expect(exp!.gridConfig.levels).toBeGreaterThanOrEqual(3);
+    });
+
+    it("re-applies market bias after level clamping so nearest order stays near market", async () => {
+      // Small CZK budget with BTC → level clamping will reduce levels.
+      // After clamping, the grid should still be centered around market price
+      // thanks to bias re-application (Fix #1).
+      const transactions = makeOscillatingTransactions(1_500_000, 50_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 2_000,
+        availableBase: 0.003, // ~4,500 CZK in BTC → total ~6,500
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+      const currentPrice = transactions[transactions.length - 1].price;
+      const exp = await repo.getExperiment(result.experimentId!);
+
+      // After clamping + bias re-application, the nearest grid level should be
+      // close to market price (within one spacing). Without bias, the grid
+      // would drift far from market after clamping.
+      const levels = calculateGridLevels(exp!.gridConfig).map((l) => l.price);
+      const nearestGapPercent = Math.min(
+        ...levels.map((p) => (Math.abs(p - currentPrice) / currentPrice) * 100),
+      );
+      // Bias targets ~0.5% gap; allow generous 2% margin for rounding and spacing
+      expect(nearestGapPercent).toBeLessThanOrEqual(2);
+    });
+  });
+
+  // ─── Exponential cooldown ──────────────────────────────────────────
+
+  describe("exponential cooldown", () => {
+    it("applies exponential backoff based on consecutiveRecycles", async () => {
+      // Simulate 3 consecutive recycles → cooldown = 10 * 2^3 = 80 min
+      await repo.updateAutopilotState({
+        enabled: true,
+        lastActionAt: new Date(Date.now() - 50 * ONE_MIN), // 50 min ago
+        consecutiveRecycles: 3,
+      });
+
+      const transactions = makeOscillatingTransactions(2_200_000, 100_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, {
+        ...TEST_AUTOPILOT_CONFIG,
+        cooldownMinutes: 10,
+        cooldownMaxMinutes: 480,
+      });
+      const result = await autopilot.engage();
+
+      // 10 * 2^3 = 80 min cooldown, only 50 min elapsed → still in cooldown
+      expect(result.action).toBe("skipped");
+      expect(result.reason).toContain("cooldown");
+    });
+
+    it("allows engagement when exponential cooldown has elapsed", async () => {
+      // 3 consecutive recycles → cooldown = 80 min. 90 min elapsed → past cooldown.
+      await repo.updateAutopilotState({
+        enabled: true,
+        lastActionAt: new Date(Date.now() - 90 * ONE_MIN),
+        consecutiveRecycles: 3,
+      });
+
+      const transactions = makeOscillatingTransactions(2_200_000, 100_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, {
+        ...TEST_AUTOPILOT_CONFIG,
+        cooldownMinutes: 10,
+        cooldownMaxMinutes: 480,
+      });
+      const result = await autopilot.engage();
+
+      expect(result.action).toBe("created");
+    });
+
+    it("caps cooldown at cooldownMaxMinutes", async () => {
+      // 10 consecutive recycles → cooldown = 10 * 2^10 = 10240, capped at 480 min
+      await repo.updateAutopilotState({
+        enabled: true,
+        lastActionAt: new Date(Date.now() - 400 * ONE_MIN), // 400 min ago
+        consecutiveRecycles: 10,
+      });
+
+      const transactions = makeOscillatingTransactions(2_200_000, 100_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, {
+        ...TEST_AUTOPILOT_CONFIG,
+        cooldownMinutes: 10,
+        cooldownMaxMinutes: 480,
+      });
+      const result = await autopilot.engage();
+
+      // Capped at 480 min, only 400 elapsed → still in cooldown
+      expect(result.action).toBe("skipped");
+      expect(result.reason).toContain("cooldown");
+    });
+
+    it("increments consecutiveRecycles on experiment creation", async () => {
+      const transactions = makeOscillatingTransactions(2_200_000, 100_000, 500);
+      const client = createMockClient({
+        getTransactions: vi.fn().mockResolvedValue({
+          error: false,
+          data: transactions,
+        }),
+      });
+
+      repo.setWallet({
+        totalAllocatedQuote: 0,
+        totalAllocatedBase: 0,
+        availableQuote: 100_000,
+        availableBase: 0,
+      });
+
+      const autopilot = new Autopilot(client, repo, walletManager, noopLogger, TEST_AUTOPILOT_CONFIG);
+      await autopilot.engage();
+
+      const state = await repo.getAutopilotState();
+      expect(state!.consecutiveRecycles).toBe(1);
     });
   });
 

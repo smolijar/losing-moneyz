@@ -233,6 +233,7 @@ export class InMemoryRepository implements Repository {
         lastConfig: null,
         lastReason: "",
         enabled: true,
+        consecutiveRecycles: 0,
         ...state,
       };
     } else {

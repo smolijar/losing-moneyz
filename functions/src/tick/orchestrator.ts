@@ -426,6 +426,11 @@ export class GridTickOrchestrator {
 
       result.fillsDetected = fills.length;
 
+      // Reset consecutive-recycle counter on first fill — proves the grid works
+      if (fills.length > 0 && this.autopilotConfig) {
+        await this.repo.updateAutopilotState({ consecutiveRecycles: 0 });
+      }
+
       const allFillEvents = [...historicalFillEvents, ...fills];
       const supervisorDecision = await this.evaluateAutonomousExperimentAction(
         experiment,
@@ -1094,7 +1099,7 @@ export class GridTickOrchestrator {
       ...openOrders.map((order) => Math.abs(order.price - currentPrice) / Math.max(gridSpacing, 1)),
     );
     const offMarketEnough =
-      nearestGapPercent >= this.autopilotConfig.stalledPriceGapPercent ||
+      nearestGapPercent >= this.autopilotConfig.stalledPriceGapPercent &&
       nearestGapSpacings >= this.autopilotConfig.stalledGridSpacingMultiplier;
     if (!offMarketEnough) {
       return undefined;

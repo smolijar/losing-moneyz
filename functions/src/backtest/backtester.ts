@@ -270,10 +270,12 @@ export function validateWithBacktest(
   options: {
     minReturnPercent?: number;
     maxDrawdownPercent?: number;
+    minCompletedCycles?: number;
   } = {},
 ): BacktestValidation {
   const minReturn = options.minReturnPercent ?? 0;
   const maxDrawdown = options.maxDrawdownPercent ?? 15;
+  const minCycles = options.minCompletedCycles ?? 0;
 
   // First validate the config itself
   const configValidation = validateGridConfig(
@@ -320,9 +322,16 @@ export function validateWithBacktest(
     );
   }
 
-  // Note: completedCycles === 0 is NOT a rejection criterion.
+  // Note: completedCycles === 0 is NOT a rejection criterion by default.
   // In trending markets the grid may not complete a full buy→sell cycle during
   // the lookback window, but the config can still be valid for range-bound trading.
+  // However, for small budgets the caller can require at least 1 cycle to prove
+  // the grid geometry is viable.
+  if (minCycles > 0 && report.completedCycles < minCycles) {
+    reasons.push(
+      `Completed cycles ${report.completedCycles} is below minimum ${minCycles}`,
+    );
+  }
 
   return {
     approved: reasons.length === 0,

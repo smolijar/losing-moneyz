@@ -1652,6 +1652,120 @@ describe("GridTickOrchestrator", () => {
       const state = await repo.getAutopilotState();
       expect(state!.lastSupervisorDecision).toBe("replacement_approved");
     });
+
+    it("does NOT recycle when percent gap is met but grid-spacing gap is not (AND logic)", async () => {
+      // Fix #3: stall detection requires BOTH conditions (percent AND spacings).
+      // Grid spacing = (2.4M - 2M) / (5-1) = 100K
+      // Order at 2_100_000, market at 2_200_000 → gap = 100K
+      //   gapPercent  = 100K / 2.2M * 100 ≈ 4.55%  → ≥ 3% ✓
+      //   gapSpacings = 100K / 100K = 1.0            → < 2  ✗
+      // Under old OR logic this would recycle; under AND logic it should NOT.
+      repo.setWallet({
+        totalAllocatedQuote: 100_000,
+        totalAllocatedBase: 0,
+        availableQuote: 50_000,
+        availableBase: 0,
+      });
+      await repo.updateAutopilotState({ enabled: false });
+
+      const id = await repo.createExperiment({
+        status: "active",
+        gridConfig,
+        allocatedQuote: 100_000,
+        allocatedBase: 0,
+      });
+      // Open order 1 spacing away from market — far in %, close in spacings
+      await repo.createOrder(id, {
+        coinmateOrderId: "8001",
+        side: "buy",
+        price: 2_100_000,
+        amount: 0.001,
+        status: "open",
+        gridLevel: 1,
+        createdAt: new Date(Date.now() - 120 * ONE_MIN),
+      });
+
+      const client = createMockClient({
+        getTicker: vi.fn().mockResolvedValue({
+          error: false,
+          data: { last: 2_200_000 },
+        }),
+        getOpenOrders: vi.fn().mockResolvedValue({
+          error: false,
+          data: [
+            { id: 8001, timestamp: Date.now(), type: "BUY", currencyPair: "BTC_CZK", price: 2_100_000, amount: 0.001 },
+          ],
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: { stalledEntryMinutes: 60 },
+      });
+
+      await orchestrator.executeTick();
+
+      // Experiment should remain active — not recycled
+      const exp = await repo.getExperiment(id);
+      expect(exp!.status).toBe("active");
+    });
+
+    it("DOES recycle when BOTH percent gap and grid-spacing gap are met", async () => {
+      // Grid spacing = 100K. Order at 2_000_000, market at 2_200_000 → gap = 200K
+      //   gapPercent  = 200K / 2.2M * 100 ≈ 9.09%  → ≥ 3% ✓
+      //   gapSpacings = 200K / 100K = 2.0            → ≥ 2  ✓
+      // Both conditions met → should recycle.
+      repo.setWallet({
+        totalAllocatedQuote: 100_000,
+        totalAllocatedBase: 0,
+        availableQuote: 50_000,
+        availableBase: 0,
+      });
+      await repo.updateAutopilotState({ enabled: false });
+
+      const id = await repo.createExperiment({
+        status: "active",
+        gridConfig,
+        allocatedQuote: 100_000,
+        allocatedBase: 0,
+      });
+      await repo.createOrder(id, {
+        coinmateOrderId: "8002",
+        side: "buy",
+        price: 2_000_000,
+        amount: 0.001,
+        status: "open",
+        gridLevel: 0,
+        createdAt: new Date(Date.now() - 120 * ONE_MIN),
+      });
+
+      const client = createMockClient({
+        getTicker: vi.fn().mockResolvedValue({
+          error: false,
+          data: { last: 2_200_000 },
+        }),
+        getOpenOrders: vi.fn().mockResolvedValue({
+          error: false,
+          data: [
+            { id: 8002, timestamp: Date.now(), type: "BUY", currencyPair: "BTC_CZK", price: 2_000_000, amount: 0.001 },
+          ],
+        }),
+      });
+
+      const walletManager = new WalletManager(repo);
+      const orchestrator = new GridTickOrchestrator(client, repo, noopLogger, {
+        walletManager,
+        autopilotConfig: { stalledEntryMinutes: 60 },
+      });
+
+      await orchestrator.executeTick();
+
+      // Both conditions met → experiment recycled
+      const exp = await repo.getExperiment(id);
+      expect(exp!.status).toBe("paused");
+      expect(exp!.allocatedQuote).toBe(0);
+    });
   });
 
   // ─── WalletManager integration (#11) ──────────────────────────────────────
