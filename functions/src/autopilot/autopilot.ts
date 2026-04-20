@@ -252,15 +252,9 @@ export class Autopilot {
 
     // 7. Validate via backtest.
     // For small budgets (where grid geometry is tight), require at least 1
-    // completed cycle to prove the grid can actually trade. For larger budgets,
-    // allow zero-cycle results since trending markets may not oscillate enough
-    // in the lookback window.
-    const SMALL_BUDGET_THRESHOLD = 5000; // CZK
-    const requireCycles = wallet.availableQuote < SMALL_BUDGET_THRESHOLD ? 1 : 0;
     const validation = validateWithBacktest(suggested.config, ticks, {
       minReturnPercent: this.config.backtestMinReturnPercent,
       maxDrawdownPercent: this.config.backtestMaxDrawdownPercent,
-      minCompletedCycles: requireCycles,
     });
 
     if (!validation.approved) {
