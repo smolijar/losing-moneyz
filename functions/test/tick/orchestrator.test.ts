@@ -1113,9 +1113,9 @@ describe("GridTickOrchestrator", () => {
       expect(snapshot).toBeDefined();
       // realizedPnl should be positive (sold higher than bought, minus fees)
       // buy: 2_100_000 * 0.001 = 2100 CZK, sell: 2_200_000 * 0.001 = 2200 CZK
-      // gross = 100 CZK, fees = 2100*0.004 + 2200*0.004 = 8.4 + 8.8 = 17.2
-      // net = 100 - 17.2 = 82.8
-      expect(snapshot!.realizedPnl).toBeCloseTo(82.8, 0);
+      // gross = 100 CZK, fees = 2100*0.0012 + 2200*0.0012 = 2.52 + 2.64 = 5.16
+      // net = 100 - 5.16 = 94.84
+      expect(snapshot!.realizedPnl).toBeCloseTo(94.84, 0);
     });
 
     it("saves zero P&L when there are no fills", async () => {

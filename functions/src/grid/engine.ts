@@ -195,26 +195,25 @@ export function reconcileOrders(
     }
   }
 
-  // Track available base for sell placement (if provided)
-  let remainingBase = options.availableBase;
-  // Track available quote for buy placement (if provided)
-  let remainingQuote = options.availableQuote;
-
   const buyLevels = gridLevels
     .filter((level) => level.price < currentPrice && !ordersByLevel.has(level.index))
     .sort((a, b) => b.price - a.price);
+
+  // CAPITAL-EFFICIENT SIZING: when we know the available balance, distribute
+  // it evenly across the unfilled levels on that side (instead of using the
+  // static budgetPerLevel which assumes market-at-midpoint and leaves capital
+  // idle when the distribution of levels above/below market is asymmetric).
+  // Fallback to budgetPerLevel for callers that don't supply balances (tests).
+  const quotePerBuy =
+    options.availableQuote !== undefined && buyLevels.length > 0
+      ? options.availableQuote / buyLevels.length
+      : budgetPerLevel;
+
   for (const level of buyLevels) {
-    const rawAmount = budgetPerLevel / level.price;
+    // Size so the total order cost (including fee) equals quotePerBuy
+    const rawAmount = quotePerBuy / (level.price * (1 + feeRate));
     const amount = roundAmount(rawAmount, pair);
     if (amount <= 0) continue;
-
-    const orderCost = amount * level.price * (1 + feeRate);
-    if (remainingQuote !== undefined) {
-      if (remainingQuote < orderCost) {
-        continue;
-      }
-      remainingQuote -= orderCost;
-    }
 
     actions.push({
       type: "place",
@@ -228,17 +227,17 @@ export function reconcileOrders(
   const sellLevels = gridLevels
     .filter((level) => level.price > currentPrice && !ordersByLevel.has(level.index))
     .sort((a, b) => a.price - b.price);
+
+  const basePerSell =
+    options.availableBase !== undefined && sellLevels.length > 0
+      ? options.availableBase / sellLevels.length
+      : undefined;
+
   for (const level of sellLevels) {
-    const rawAmount = (budgetPerLevel / level.price) * (1 - feeRate);
+    const rawAmount =
+      basePerSell !== undefined ? basePerSell : (budgetPerLevel / level.price) * (1 - feeRate);
     const amount = roundAmount(rawAmount, pair);
     if (amount <= 0) continue;
-
-    if (remainingBase !== undefined) {
-      if (remainingBase < amount) {
-        continue;
-      }
-      remainingBase -= amount;
-    }
 
     actions.push({
       type: "place",

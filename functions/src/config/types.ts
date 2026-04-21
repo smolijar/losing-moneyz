@@ -170,12 +170,12 @@ export const WalletStateDocSchema = z.object({
   availableBase: z.number(),
 });
 
-/** Coinmate fee structure */
+/** Coinmate fee structure (VIP-1 tier, verified by operator) */
 export const COINMATE_FEES = {
-  /** Maker fee for volume < 10,000 EUR (lowest tier) */
-  maker: 0.004,
-  /** Taker fee for volume < 10,000 EUR (lowest tier) */
-  taker: 0.006,
+  /** Maker fee */
+  maker: 0.0012,
+  /** Taker fee */
+  taker: 0.0024,
   /** Minimum grid spacing multiplier over fee to ensure profitability */
   minSpacingMultiplier: 3,
 } as const;
@@ -282,7 +282,7 @@ export interface AutopilotConfig {
 export const AUTOPILOT_DEFAULTS: AutopilotConfig = {
   pair: "BTC_CZK",
   rangeMultiplier: 2.0,
-  spacingMultiplier: 1.5,
+  spacingMultiplier: 0.75,
   minHistoryMinutes: 1440, // 24 hours
   backtestMinReturnPercent: -15, // permissive — grid profits come from oscillation over time,
   // not from a single trending lookback window

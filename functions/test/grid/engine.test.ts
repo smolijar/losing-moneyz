@@ -661,16 +661,16 @@ describe("reconcileOrders fee-adjusted sells", () => {
     const actions = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel);
 
     const sells = actions.filter((a) => a.type === "place" && a.side === "sell");
-    // Default fee is COINMATE_FEES.maker = 0.004
+    // Default fee is COINMATE_FEES.maker = 0.0012 (Coinmate VIP-1 tier)
     for (const sell of sells) {
       if (sell.type !== "place") continue;
       const rawAmount = budgetPerLevel / sell.price;
-      const expectedAmount = roundAmount(rawAmount * (1 - 0.004));
+      const expectedAmount = roundAmount(rawAmount * (1 - 0.0012));
       expect(sell.amount).toBe(expectedAmount);
     }
   });
 
-  it("buy amounts are NOT fee-adjusted", () => {
+  it("buy amounts are fee-adjusted so order cost incl. fee equals budgetPerLevel", () => {
     const actions = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
       feeRate: 0.004,
     });
@@ -678,7 +678,9 @@ describe("reconcileOrders fee-adjusted sells", () => {
     const buys = actions.filter((a) => a.type === "place" && a.side === "buy");
     for (const buy of buys) {
       if (buy.type !== "place") continue;
-      const rawAmount = budgetPerLevel / buy.price;
+      // Engine sizes buys so (amount * price * (1 + fee)) == budgetPerLevel,
+      // reserving quote for the fee rather than overshooting the budget.
+      const rawAmount = budgetPerLevel / (buy.price * (1 + 0.004));
       const expectedAmount = roundAmount(rawAmount);
       expect(buy.amount).toBe(expectedAmount);
     }
@@ -698,7 +700,7 @@ describe("reconcileOrders availableBase constraint", () => {
   const levels = calculateGridLevels(config);
   const budgetPerLevel = config.budgetQuote / Math.ceil(config.levels / 2);
 
-  it("caps sell orders when availableBase is insufficient", () => {
+  it("distributes availableBase evenly across all sell levels", () => {
     // With no constraint, expect 3 sells (levels above 2_050_000)
     const unconstrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
       feeRate: 0.004,
@@ -706,7 +708,8 @@ describe("reconcileOrders availableBase constraint", () => {
     const uncSells = unconstrained.filter((a) => a.type === "place" && a.side === "sell");
     expect(uncSells.length).toBe(3);
 
-    // Provide only enough base for ~1 sell
+    // Provide base equal to one unconstrained sell amount; engine should split
+    // it evenly across all 3 sell levels (capital-efficient), not stack it on one.
     const firstSellAmount = uncSells[0].type === "place" ? uncSells[0].amount : 0;
     const constrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
       feeRate: 0.004,
@@ -714,9 +717,12 @@ describe("reconcileOrders availableBase constraint", () => {
     });
     const conSells = constrained.filter((a) => a.type === "place" && a.side === "sell");
 
-    // Should only place 1 sell (the first one), skip the rest
-    expect(conSells.length).toBe(1);
-    expect(conSells[0].type === "place" && conSells[0].amount).toBe(firstSellAmount);
+    expect(conSells.length).toBe(3);
+    const expectedPerSell = firstSellAmount / 3;
+    for (const sell of conSells) {
+      if (sell.type !== "place") continue;
+      expect(sell.amount).toBeCloseTo(expectedPerSell, 6);
+    }
   });
 
   it("places no sells when availableBase is 0", () => {
@@ -746,24 +752,22 @@ describe("reconcileOrders availableBase constraint", () => {
     expect(buys.length).toBe(3);
   });
 
-  it("decrements remaining base across multiple sells", () => {
-    // Provide exactly enough for 2 of the 3 sells
-    const unconstrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
-      feeRate: 0.004,
-    });
-    const uncSells = unconstrained.filter((a) => a.type === "place" && a.side === "sell");
-
-    let firstTwoTotal = 0;
-    for (let i = 0; i < 2 && i < uncSells.length; i++) {
-      if (uncSells[i].type === "place") firstTwoTotal += uncSells[i].amount;
-    }
-
+  it("does not exceed availableBase when summed across sells", () => {
+    const availableBase = 0.005;
     const constrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
       feeRate: 0.004,
-      availableBase: firstTwoTotal,
+      availableBase,
     });
     const conSells = constrained.filter((a) => a.type === "place" && a.side === "sell");
-    expect(conSells.length).toBe(2);
+    const totalAmount = conSells.reduce(
+      (sum, s) => sum + (s.type === "place" ? s.amount : 0),
+      0,
+    );
+    // Half-even rounding (no pair given) may round each level up by up to 0.5 satoshi,
+    // so tolerate up to ~1 satoshi per level in aggregate.
+    expect(totalAmount).toBeLessThanOrEqual(availableBase + 5e-8);
+    // All 3 sell levels should still be placed (even distribution).
+    expect(conSells.length).toBe(3);
   });
 });
 
@@ -780,7 +784,7 @@ describe("reconcileOrders availableQuote constraint", () => {
   const levels = calculateGridLevels(config);
   const budgetPerLevel = config.budgetQuote / Math.ceil(config.levels / 2);
 
-  it("caps buy orders when availableQuote is insufficient", () => {
+  it("distributes availableQuote evenly across all buy levels", () => {
     // With no constraint, expect 3 buys (levels below 2_050_000)
     const unconstrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
       feeRate: 0.004,
@@ -788,7 +792,8 @@ describe("reconcileOrders availableQuote constraint", () => {
     const uncBuys = unconstrained.filter((a) => a.type === "place" && a.side === "buy");
     expect(uncBuys.length).toBe(3);
 
-    // Provide only enough quote for ~1 buy (including fee reservation)
+    // Provide quote equal to one unconstrained buy cost; engine should split
+    // it across all 3 buy levels rather than stacking it on one.
     const feeRate = 0.004;
     const firstBuyCost =
       uncBuys[0].type === "place" ? uncBuys[0].amount * uncBuys[0].price * (1 + feeRate) : 0;
@@ -798,9 +803,13 @@ describe("reconcileOrders availableQuote constraint", () => {
     });
     const conBuys = constrained.filter((a) => a.type === "place" && a.side === "buy");
 
-    // Should only place 1 buy, prioritizing the nearest level below market.
-    expect(conBuys.length).toBe(1);
-    expect(conBuys[0].type === "place" ? conBuys[0].price : 0).toBe(2_040_000);
+    expect(conBuys.length).toBe(3);
+    const quotePerBuy = firstBuyCost / 3;
+    for (const buy of conBuys) {
+      if (buy.type !== "place") continue;
+      const actualCost = buy.amount * buy.price * (1 + feeRate);
+      expect(actualCost).toBeLessThanOrEqual(quotePerBuy + 1);
+    }
   });
 
   it("places no buys when availableQuote is 0", () => {
@@ -830,46 +839,32 @@ describe("reconcileOrders availableQuote constraint", () => {
     expect(sells.length).toBe(3);
   });
 
-  it("decrements remaining quote across multiple buys", () => {
-    // Provide exactly enough for 2 of the 3 buys (including fee reservation)
+  it("does not exceed availableQuote when summed across buys", () => {
     const feeRate = 0.004;
-    const unconstrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
-      feeRate,
-    });
-    const uncBuys = unconstrained.filter((a) => a.type === "place" && a.side === "buy");
-
-    let firstTwoCost = 0;
-    for (let i = 0; i < 2 && i < uncBuys.length; i++) {
-      if (uncBuys[i].type === "place")
-        firstTwoCost += uncBuys[i].amount * uncBuys[i].price * (1 + feeRate);
-    }
-
+    const availableQuote = 15_000;
     const constrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
       feeRate,
-      availableQuote: firstTwoCost,
+      availableQuote,
     });
     const conBuys = constrained.filter((a) => a.type === "place" && a.side === "buy");
-    expect(conBuys.length).toBe(2);
-    expect(conBuys[0].type === "place" ? conBuys[0].price : 0).toBe(2_040_000);
+    const totalCost = conBuys.reduce((sum, b) => {
+      if (b.type !== "place") return sum;
+      return sum + b.amount * b.price * (1 + feeRate);
+    }, 0);
+    expect(totalCost).toBeLessThanOrEqual(availableQuote + 1);
+    expect(conBuys.length).toBe(3);
   });
 
-  it("prioritizes nearest buy levels below market when quote is constrained", () => {
+  it("sorts buy levels nearest-first so constrained placements are adjacent to market", () => {
     const feeRate = 0.004;
-    const unconstrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
-      feeRate,
-    });
-    const uncBuys = unconstrained.filter((a) => a.type === "place" && a.side === "buy");
-    const firstBuyCost =
-      uncBuys[0].type === "place" ? uncBuys[0].amount * uncBuys[0].price * (1 + feeRate) : 0;
     const constrained = reconcileOrders(levels, [], [], 2_050_000, budgetPerLevel, {
       feeRate,
-      availableQuote: firstBuyCost,
+      availableQuote: 15_000,
     });
     const conBuys = constrained.filter((a) => a.type === "place" && a.side === "buy");
-
-    expect(conBuys.length).toBe(1);
-    expect(conBuys[0].type === "place" ? conBuys[0].gridLevel : -1).toBe(2);
+    // First buy returned should be the nearest to market (highest price below).
     expect(conBuys[0].type === "place" ? conBuys[0].price : 0).toBe(2_040_000);
+    expect(conBuys[0].type === "place" ? conBuys[0].gridLevel : -1).toBe(2);
   });
 });
 

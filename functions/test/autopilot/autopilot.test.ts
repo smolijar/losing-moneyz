@@ -442,13 +442,14 @@ describe("Autopilot", () => {
     });
 
     it("does not skip when quote is low but mixed inventory has enough total value", async () => {
-      // Needs enough CZK to fund at least 3 levels after level clamping.
-      // At ~1.54M price, 3 levels need bpl/upperPrice >= 0.0002 BTC,
-      // i.e. ~1000 CZK / 2 = 500 bpl ≈ 0.000316 BTC per level. ✓
+      // Needs enough CZK to fund the minimum level count at Coinmate's 0.0001 BTC
+      // minimum order size. At ~1.54M price with tighter spacing (~0.75x mult)
+      // more levels fit in range, so we need more total CZK to keep per-level
+      // budget above the BTC-minimum-order threshold.
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 1_000,
+        availableQuote: 1_500,
         availableBase: 0.00275881,
       });
 
@@ -619,7 +620,7 @@ describe("Autopilot", () => {
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 1_000,
+        availableQuote: 1_500,
         availableBase: 0.00275881,
       });
 
@@ -628,7 +629,7 @@ describe("Autopilot", () => {
 
       expect(result.action).toBe("created");
       const exp = await repo.getExperiment(result.experimentId!);
-      expect(exp!.allocatedQuote).toBeCloseTo(1_000);
+      expect(exp!.allocatedQuote).toBeCloseTo(1_500);
       expect(exp!.allocatedBase).toBeCloseTo(0.00275881);
 
       const wallet = await walletManager.getState();
@@ -650,7 +651,7 @@ describe("Autopilot", () => {
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 1_000,
+        availableQuote: 1_500,
         availableBase: 0.00275881,
       });
 
@@ -661,8 +662,8 @@ describe("Autopilot", () => {
       const exp = await repo.getExperiment(result.experimentId!);
       // budgetQuote should match the CZK-only portion (level clamping sets it
       // before experiment creation, not via post-creation reconciliation).
-      expect(exp!.gridConfig.budgetQuote).toBeCloseTo(1_000);
-      expect(exp!.allocatedQuote).toBeCloseTo(1_000);
+      expect(exp!.gridConfig.budgetQuote).toBeCloseTo(1_500);
+      expect(exp!.allocatedQuote).toBeCloseTo(1_500);
     });
 
     it("shapes mixed-wallet restart config so the nearest sell is near market", async () => {
@@ -678,7 +679,7 @@ describe("Autopilot", () => {
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 1_000,
+        availableQuote: 1_500,
         availableBase: 0.00275881,
       });
 
@@ -774,7 +775,7 @@ describe("Autopilot", () => {
       repo.setWallet({
         totalAllocatedQuote: 0,
         totalAllocatedBase: 0,
-        availableQuote: 1_000,
+        availableQuote: 1_500,
         availableBase: 0.00275881,
       });
 
