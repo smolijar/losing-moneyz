@@ -18,6 +18,13 @@ export interface SafeguardConfig {
   staleTicThresholdMs: number;
   /** Maximum time without any fills (ms) before pausing to allow Autopilot to recalibrate */
   maxIdleTimeMs: number;
+  /**
+   * Number of consecutive "Not enough account balance" rejections from the
+   * exchange before pausing. Much tighter than the generic API-failure counter
+   * because this error means our local view of available funds is drifting
+   * from reality — retrying the same order will keep failing.
+   */
+  maxConsecutiveBalanceErrors: number;
 }
 
 export const DEFAULT_SAFEGUARD_CONFIG: SafeguardConfig = {
@@ -25,6 +32,7 @@ export const DEFAULT_SAFEGUARD_CONFIG: SafeguardConfig = {
   maxConsecutiveApiFailures: 8,
   staleTicThresholdMs: 10 * 60 * 1000, // 10 minutes
   maxIdleTimeMs: 3 * 24 * 60 * 60 * 1000, // 3 days
+  maxConsecutiveBalanceErrors: 3,
 };
 
 /**
@@ -148,6 +156,30 @@ export function checkCircuitBreaker(
 }
 
 /**
+ * Check consecutive balance-rejection count.
+ *
+ * Triggers when the exchange repeatedly refuses orders with "Not enough
+ * account balance" — our local view of available funds has drifted from
+ * exchange truth and retrying is futile until reconciled.
+ */
+export function checkBalanceErrorBudget(
+  consecutiveBalanceErrors: number,
+  config: SafeguardConfig = DEFAULT_SAFEGUARD_CONFIG,
+): SafeguardResult {
+  if (consecutiveBalanceErrors >= config.maxConsecutiveBalanceErrors) {
+    return {
+      ok: false,
+      action: "pause",
+      reason:
+        `${consecutiveBalanceErrors} consecutive insufficient-balance rejections ` +
+        `(limit: ${config.maxConsecutiveBalanceErrors}) — run wallet:heal`,
+    };
+  }
+
+  return { ok: true, action: "continue" };
+}
+
+/**
  * Check if the experiment's open order count is within limits.
  */
 export function checkMaxOrders(
@@ -214,12 +246,14 @@ export function runAllSafeguards(
   config: SafeguardConfig = DEFAULT_SAFEGUARD_CONFIG,
   now: Date = new Date(),
   fills?: FillEvent[],
+  consecutiveBalanceErrors: number = 0,
 ): { results: SafeguardResult[]; shouldPause: boolean; warnings: string[] } {
   const results = [
     checkPriceInRange(experiment, currentPrice),
     checkDrawdown(experiment, lastSnapshot, config, currentPrice, fills),
     checkStaleTick(lastSnapshot, now, config),
     checkCircuitBreaker(consecutiveFailures, config),
+    checkBalanceErrorBudget(consecutiveBalanceErrors, config),
     checkMaxOrders(openOrderCount, experiment.gridConfig.levels),
     checkIdleTime(experiment, fills, now, config),
   ];

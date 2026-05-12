@@ -65,8 +65,10 @@ export interface AlertEvent {
     | "emergency_stop_failed"
     | "circuit_breaker_increment"
     | "wallet_release_success"
-    | "wallet_release_failed";
-  experimentId: string;
+    | "wallet_release_failed"
+    | "wallet_drift_detected";
+  /** Optional — omitted for tick-wide events like wallet drift that aren't scoped to one experiment. */
+  experimentId?: string;
   message: string;
   data?: Record<string, unknown>;
   timestamp: Date;
@@ -191,6 +193,23 @@ export class GridTickOrchestrator {
           this.logger.warn("Wallet discrepancy detected", {
             quoteDiscrepancy: sync.quoteDiscrepancy,
             baseDiscrepancy: sync.baseDiscrepancy,
+          });
+          // Emit observability signal but DON'T auto-pause here:
+          // - Positive discrepancy (unbooked deposit) is benign.
+          // - Negative discrepancy is the dangerous case but a single sync
+          //   reading can be eventually-consistent noise. The downstream
+          //   `consecutiveBalanceErrors` counter pauses experiments when
+          //   the discrepancy actually manifests as repeated exchange
+          //   rejections — which is the lived symptom we care about.
+          this.alertSink.emit({
+            severity: "warning",
+            type: "wallet_drift_detected",
+            message: "Wallet sync discrepancy with exchange truth",
+            data: {
+              quoteDiscrepancy: sync.quoteDiscrepancy,
+              baseDiscrepancy: sync.baseDiscrepancy,
+            },
+            timestamp: new Date(),
           });
         }
       } catch (err) {
@@ -336,6 +355,7 @@ export class GridTickOrchestrator {
         this.safeguardConfig,
         timestamp,
         historicalFillEvents,
+        experiment.consecutiveBalanceErrors,
       );
 
       result.warnings = safeguards.warnings;
@@ -527,14 +547,18 @@ export class GridTickOrchestrator {
       }
 
       // 8. Execute order actions
+      let balanceErrorObserved = false;
+      let actionSucceeded = false;
       for (const action of actions) {
         try {
           if (action.type === "place") {
             await this.executePlaceOrder(experiment, action);
             result.ordersPlaced++;
+            actionSucceeded = true;
           } else if (action.type === "cancel") {
             await this.executeCancelOrder(experiment, action);
             result.ordersCancelled++;
+            actionSucceeded = true;
           }
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
@@ -553,6 +577,10 @@ export class GridTickOrchestrator {
           });
           result.warnings.push(`Order action failed: ${errMsg}`);
 
+          if (errMsg.toLowerCase().includes("not enough account balance available")) {
+            balanceErrorObserved = true;
+          }
+
           const blockedRecovery = await this.handleBlockedActiveExperiment(
             experiment,
             action,
@@ -566,6 +594,25 @@ export class GridTickOrchestrator {
             return result;
           }
         }
+      }
+
+      // Track consecutive balance-rejection errors. The dedicated counter feeds
+      // checkBalanceErrorBudget so we pause much faster than the generic
+      // 8-failure circuit breaker when our view of available funds drifts from
+      // exchange truth (retrying is futile until wallet:heal runs).
+      if (balanceErrorObserved && !actionSucceeded) {
+        const newCount = experiment.consecutiveBalanceErrors + 1;
+        await this.repo.updateExperiment(experiment.id, {
+          consecutiveBalanceErrors: newCount,
+        });
+        this.logger.warn("Insufficient balance rejection counted", {
+          experimentId: experiment.id,
+          consecutiveBalanceErrors: newCount,
+          limit: this.safeguardConfig.maxConsecutiveBalanceErrors,
+        });
+      } else if (actionSucceeded && experiment.consecutiveBalanceErrors > 0) {
+        // Any successful action proves our balance view is current — reset.
+        await this.repo.updateExperiment(experiment.id, { consecutiveBalanceErrors: 0 });
       }
 
       // 9. Save snapshot with fill-derived balances (#13)

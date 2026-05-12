@@ -15,6 +15,7 @@ export {
   checkDrawdown,
   checkStaleTick,
   checkCircuitBreaker,
+  checkBalanceErrorBudget,
   checkMaxOrders,
   type SafeguardResult,
   type SafeguardConfig,

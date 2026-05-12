@@ -80,6 +80,11 @@ export interface Experiment {
   allocatedBase: number;
   /** Number of consecutive tick failures (for circuit breaker) */
   consecutiveFailures: number;
+  /**
+   * Number of consecutive "insufficient balance" rejections from the exchange.
+   * Reset to 0 on any successful order placement / cancellation in a tick.
+   */
+  consecutiveBalanceErrors: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -135,6 +140,7 @@ export const ExperimentDocSchema = z.object({
   allocatedQuote: z.number(),
   allocatedBase: z.number(),
   consecutiveFailures: z.number().default(0),
+  consecutiveBalanceErrors: z.number().default(0),
   createdAt: FirestoreDate,
   updatedAt: FirestoreDate,
 });

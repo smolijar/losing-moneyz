@@ -49,6 +49,7 @@ export class InMemoryRepository implements Repository {
       ...data,
       id,
       consecutiveFailures: data.consecutiveFailures ?? 0,
+      consecutiveBalanceErrors: data.consecutiveBalanceErrors ?? 0,
       createdAt: now,
       updatedAt: now,
     };

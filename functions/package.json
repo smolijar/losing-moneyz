@@ -16,7 +16,8 @@
     "experiment:create": "tsx scripts/experiment-create.ts",
     "experiment:stop": "tsx scripts/experiment-stop.ts",
     "experiment:cleanup": "tsx scripts/experiment-cleanup.ts",
-    "wallet:sync": "tsx scripts/wallet-sync.ts"
+    "wallet:sync": "tsx scripts/wallet-sync.ts",
+    "wallet:heal": "tsx scripts/wallet-heal.ts"
   },
   "engines": {
     "node": "22"

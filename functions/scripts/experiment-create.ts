@@ -212,6 +212,7 @@ async function main() {
     allocatedQuote: 0, // Will be set by walletManager.allocateForExperiment
     allocatedBase: 0,
     consecutiveFailures: 0,
+    consecutiveBalanceErrors: 0,
   });
 
   // Allocate wallet

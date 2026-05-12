@@ -4,6 +4,7 @@ import {
   checkDrawdown,
   checkStaleTick,
   checkCircuitBreaker,
+  checkBalanceErrorBudget,
   checkMaxOrders,
   runAllSafeguards,
   DEFAULT_SAFEGUARD_CONFIG,
@@ -24,6 +25,7 @@ const baseExperiment: Experiment = {
   allocatedQuote: 100_000,
   allocatedBase: 0,
   consecutiveFailures: 0,
+  consecutiveBalanceErrors: 0,
   createdAt: new Date(),
   updatedAt: new Date(),
 };
@@ -195,6 +197,32 @@ describe("checkCircuitBreaker", () => {
 
   it("pauses above threshold", () => {
     const result = checkCircuitBreaker(10);
+    expect(result.ok).toBe(false);
+    expect(result.action).toBe("pause");
+  });
+});
+
+describe("checkBalanceErrorBudget", () => {
+  it("returns ok when no balance errors", () => {
+    const result = checkBalanceErrorBudget(0);
+    expect(result.ok).toBe(true);
+  });
+
+  it("returns ok under threshold", () => {
+    const result = checkBalanceErrorBudget(2);
+    expect(result.ok).toBe(true);
+  });
+
+  it("pauses at threshold and references wallet:heal", () => {
+    const result = checkBalanceErrorBudget(3);
+    expect(result.ok).toBe(false);
+    expect(result.action).toBe("pause");
+    expect(result.reason).toContain("insufficient-balance");
+    expect(result.reason).toContain("wallet:heal");
+  });
+
+  it("pauses above threshold", () => {
+    const result = checkBalanceErrorBudget(10);
     expect(result.ok).toBe(false);
     expect(result.action).toBe("pause");
   });

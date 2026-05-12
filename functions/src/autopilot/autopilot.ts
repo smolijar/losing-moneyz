@@ -338,6 +338,7 @@ export class Autopilot {
       allocatedQuote: adjustedConfig.budgetQuote,
       allocatedBase: 0,
       consecutiveFailures: 0,
+      consecutiveBalanceErrors: 0,
     });
 
     // 10. Allocate wallet
